@@ -1,0 +1,21 @@
+{
+  "name": "novacollab-desktop",
+  "version": "0.1.0",
+  "description": "Electron оболочка для настольной версии NovaCollab",
+  "main": "main.js",
+  "author": "",
+  "license": "MIT",
+  "scripts": {
+    "start": "electron .",
+    "dev": "cross-env VITE_DEV_SERVER_URL=http://localhost:5173 electron .",
+    "package": "electron-builder --windows --config electron-builder.json"
+  },
+  "dependencies": {
+    "electron-is-dev": "^2.0.0"
+  },
+  "devDependencies": {
+    "cross-env": "^7.0.3",
+    "electron": "^26.2.0",
+    "electron-builder": "^24.6.0"
+  }
+}
