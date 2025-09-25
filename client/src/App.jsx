@@ -4,7 +4,7 @@ import PropTypes from 'prop-types';
 import { useAuthStore } from './store/useAuthStore';
 import LandingPage from './pages/LandingPage';
 import Dashboard from './pages/Dashboard';
-import Room from './pages/Room';
+import Chat from './pages/Chat';
 import AuthPage from './pages/AuthPage';
 import LoadingScreen from './components/LoadingScreen';
 import './App.css';
@@ -53,10 +53,10 @@ const App = () => {
         }
       />
       <Route
-        path="/room/:roomId"
+        path="/chat/:chatId"
         element={
           <RequireAuth>
-            <Room />
+            <Chat />
           </RequireAuth>
         }
       />

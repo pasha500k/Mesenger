@@ -10,6 +10,7 @@ import ControlsBar from '../components/ControlsBar';
 import VideoGrid from '../components/VideoGrid';
 import Whiteboard from '../components/Whiteboard';
 import { apiRequest } from '../api';
+import LoadingScreen from '../components/LoadingScreen';
 
 const ICE_SERVERS = [{ urls: 'stun:stun.l.google.com:19302' }];
 
@@ -40,8 +41,8 @@ const normalizeMessage = (payload, apiBaseUrl) => {
   };
 };
 
-const Room = () => {
-  const { roomId } = useParams();
+const Chat = () => {
+  const { chatId } = useParams();
   const navigate = useNavigate();
   const user = useAuthStore((state) => state.user);
 
@@ -59,6 +60,9 @@ const Room = () => {
   const [historyError, setHistoryError] = useState(null);
   const [micMuted, setMicMuted] = useState(false);
   const [cameraOff, setCameraOff] = useState(false);
+  const [chatInfo, setChatInfo] = useState(null);
+  const [chatInfoError, setChatInfoError] = useState(null);
+  const [loadingChat, setLoadingChat] = useState(true);
 
   const socketRef = useRef(null);
   const peersRef = useRef(new Map());
@@ -69,10 +73,44 @@ const Room = () => {
 
   useEffect(() => {
     let active = true;
+    setChatInfo(null);
+    setChatInfoError(null);
+    setLoadingChat(true);
+    if (!chatId) {
+      setChatInfoError('Чат не найден');
+      setLoadingChat(false);
+      return () => {};
+    }
+    apiRequest(`/api/chats/${chatId}`, { method: 'GET' })
+      .then((data) => {
+        if (!active) return;
+        setChatInfo(data.chat || null);
+        if (!data.chat) {
+          setChatInfoError('Чат не найден или недоступен');
+        }
+      })
+      .catch((err) => {
+        if (!active) return;
+        setChatInfoError(err.message);
+      })
+      .finally(() => {
+        if (!active) return;
+        setLoadingChat(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [chatId]);
+
+  useEffect(() => {
+    if (!chatId || loadingChat || chatInfoError) {
+      return;
+    }
+    let active = true;
     setLoadingHistory(true);
     setHistoryError(null);
     setMessages([]);
-    apiRequest(`/api/rooms/${roomId}/messages`, { method: 'GET' })
+    apiRequest(`/api/chats/${chatId}/messages`, { method: 'GET' })
       .then((data) => {
         if (!active) return;
         const normalized = (data.messages || [])
@@ -91,7 +129,7 @@ const Room = () => {
     return () => {
       active = false;
     };
-  }, [roomId]);
+  }, [chatId, loadingChat, chatInfoError]);
 
   const cleanupConnections = useCallback(() => {
     peersRef.current.forEach((pc) => {
@@ -139,7 +177,7 @@ const Room = () => {
       pc.onicecandidate = (event) => {
         if (event.candidate) {
           socketRef.current?.emit('signal', {
-            roomId,
+            chatId,
             target: peerId,
             data: { type: 'candidate', candidate: event.candidate },
           });
@@ -159,7 +197,7 @@ const Room = () => {
           try {
             const offer = await pc.createOffer();
             await pc.setLocalDescription(offer);
-            socketRef.current?.emit('signal', { roomId, target: peerId, data: offer });
+            socketRef.current?.emit('signal', { chatId, target: peerId, data: offer });
           } catch (err) {
             console.error('Offer error', err);
           }
@@ -169,7 +207,7 @@ const Room = () => {
 
       return pc;
     },
-    [roomId]
+    [chatId]
   );
 
   const handleSignal = useCallback(
@@ -184,7 +222,7 @@ const Room = () => {
           await peerConnection.setRemoteDescription(new RTCSessionDescription(data));
           const answer = await peerConnection.createAnswer();
           await peerConnection.setLocalDescription(answer);
-          socketRef.current?.emit('signal', { roomId, target: sender, data: answer });
+          socketRef.current?.emit('signal', { chatId, target: sender, data: answer });
         } else if (data.type === 'answer') {
           await peerConnection.setRemoteDescription(new RTCSessionDescription(data));
         } else if (data.type === 'candidate' && data.candidate) {
@@ -194,7 +232,7 @@ const Room = () => {
         console.error('Signal error', err);
       }
     },
-    [createPeerConnection, roomId]
+    [createPeerConnection, chatId]
   );
 
   useEffect(() => {
@@ -209,6 +247,9 @@ const Room = () => {
   }, [participants]);
 
   useEffect(() => {
+    if (loadingChat || chatInfoError || !chatId) {
+      return undefined;
+    }
     const socket = io(SOCKET_URL, {
       withCredentials: true,
       transports: ['websocket'],
@@ -218,7 +259,7 @@ const Room = () => {
     socket.on('connect', () => {
       selfIdRef.current = socket.id;
       setSocketReady(true);
-      socket.emit('joinRoom', { roomId, displayName: user?.username });
+      socket.emit('joinChat', { chatId, displayName: user?.username });
     });
 
     socket.on('connect_error', (err) => {
@@ -276,13 +317,13 @@ const Room = () => {
     });
 
     return () => {
-      socket.emit('leaveRoom', { roomId });
+      socket.emit('leaveChat', { chatId });
       socket.removeAllListeners();
       socket.disconnect();
       stopLocalMedia();
       cleanupConnections();
     };
-  }, [cleanupConnections, handleSignal, roomId, stopLocalMedia, user?.username]);
+  }, [cleanupConnections, handleSignal, chatId, chatInfoError, loadingChat, stopLocalMedia, user?.username]);
 
   useEffect(() => {
     if (!callActive) return;
@@ -307,17 +348,17 @@ const Room = () => {
 
   const handleSendMessage = (message) => {
     if (!socketRef.current) return;
-    socketRef.current.emit('chatMessage', { roomId, message });
+    socketRef.current.emit('chatMessage', { chatId, message });
   };
 
   const handleSendAudioMessage = ({ dataUrl, duration }) => {
     if (!socketRef.current || !dataUrl) return;
-    socketRef.current.emit('voiceMessage', { roomId, audioData: dataUrl, duration });
+    socketRef.current.emit('voiceMessage', { chatId, audioData: dataUrl, duration });
   };
 
   const handleSendFile = (file) => {
     if (!socketRef.current) return;
-    socketRef.current.emit('fileShare', { roomId, ...file });
+    socketRef.current.emit('fileShare', { chatId, ...file });
   };
 
   const handleStartCall = async () => {
@@ -325,7 +366,7 @@ const Room = () => {
       const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
       localStreamRef.current = stream;
       setLocalStream(stream);
-      socketRef.current?.emit('startCall', { roomId });
+      socketRef.current?.emit('startCall', { chatId });
       setMicMuted(false);
       setCameraOff(false);
     } catch (err) {
@@ -335,7 +376,7 @@ const Room = () => {
   };
 
   const handleEndCall = () => {
-    socketRef.current?.emit('endCall', { roomId });
+    socketRef.current?.emit('endCall', { chatId });
     stopLocalMedia();
     cleanupConnections();
     setBoardStrokes([]);
@@ -344,21 +385,21 @@ const Room = () => {
   };
 
   const handleRequestBoard = () => {
-    socketRef.current?.emit('requestBoard', { roomId });
+    socketRef.current?.emit('requestBoard', { chatId });
   };
 
   const handleCloseBoard = () => {
-    socketRef.current?.emit('closeBoard', { roomId });
+    socketRef.current?.emit('closeBoard', { chatId });
   };
 
   const handleDrawStroke = (stroke) => {
     setBoardStrokes((prev) => [...prev, stroke]);
-    socketRef.current?.emit('boardDraw', { roomId, stroke });
+    socketRef.current?.emit('boardDraw', { chatId, stroke });
   };
 
   const handleClearBoard = () => {
     setBoardStrokes([]);
-    socketRef.current?.emit('boardClear', { roomId });
+    socketRef.current?.emit('boardClear', { chatId });
   };
 
   const handleLeave = () => {
@@ -394,20 +435,45 @@ const Room = () => {
     });
   };
 
+  if (loadingChat) {
+    return <LoadingScreen message="Открываем чат..." />;
+  }
+
+  if (chatInfoError) {
+    return (
+      <div className="min-h-screen bg-slate-950 text-white flex items-center justify-center px-6">
+        <div className="max-w-md text-center space-y-4">
+          <h1 className="text-2xl font-semibold">Не удалось открыть диалог</h1>
+          <p className="text-slate-300">{chatInfoError}</p>
+          <button
+            onClick={() => navigate('/dashboard')}
+            className="px-5 py-2.5 rounded-full bg-indigo-500 hover:bg-indigo-400 transition"
+          >
+            Вернуться к списку чатов
+          </button>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="min-h-screen bg-slate-950 text-white">
       <div className="max-w-7xl mx-auto px-6 py-6 space-y-6">
         <header className="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
           <div>
-            <h1 className="text-2xl font-semibold">Комната {roomId}</h1>
-            <p className="text-sm text-slate-400">Пригласите коллег, отправив им этот код комнаты.</p>
+            <h1 className="text-2xl font-semibold">
+              {chatInfo?.partner ? `Чат с ${chatInfo.partner.username}` : 'Личный чат'}
+            </h1>
+            <p className="text-sm text-slate-400">
+              История сообщений сохранится автоматически. Идентификатор чата: <span className="font-mono">{chatId}</span>
+            </p>
             {error && <p className="text-sm text-rose-300 mt-2">{error}</p>}
           </div>
           <button
             onClick={handleLeave}
             className="self-start md:self-auto px-5 py-2.5 rounded-full border border-white/20 hover:border-white/60 transition"
           >
-            Выйти из комнаты
+            Выйти из чата
           </button>
         </header>
 
@@ -428,7 +494,14 @@ const Room = () => {
         <div className="grid xl:grid-cols-[minmax(320px,380px),1fr] gap-6">
           <section className="space-y-6">
             <div className="rounded-3xl border border-white/10 bg-white/5 backdrop-blur-xl p-5 h-full min-h-[360px] flex flex-col">
-              <h2 className="text-lg font-semibold mb-4">Чат комнаты</h2>
+              <h2 className="text-lg font-semibold mb-4">
+                Диалог
+                {chatInfo?.partner ? (
+                  <span className="block text-xs text-slate-300 font-normal mt-1">
+                    Собеседник: {chatInfo.partner.username}
+                  </span>
+                ) : null}
+              </h2>
               {historyError && <p className="text-xs text-rose-300 mb-2">{historyError}</p>}
               {loadingHistory ? (
                 <p className="text-sm text-slate-400">Загружаем историю сообщений...</p>
@@ -473,4 +546,4 @@ const Room = () => {
   );
 };
 
-export default Room;
+export default Chat;

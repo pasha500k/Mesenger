@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { apiRequest } from '../api';
 import { useAuthStore } from '../store/useAuthStore';
@@ -7,49 +7,88 @@ const Dashboard = () => {
   const navigate = useNavigate();
   const user = useAuthStore((state) => state.user);
   const logout = useAuthStore((state) => state.logout);
-  const [rooms, setRooms] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [roomId, setRoomId] = useState('');
-  const [creating, setCreating] = useState(false);
+  const [chats, setChats] = useState([]);
+  const [loadingChats, setLoadingChats] = useState(true);
+  const [query, setQuery] = useState('');
+  const [searchResults, setSearchResults] = useState([]);
+  const [searching, setSearching] = useState(false);
+  const [searchError, setSearchError] = useState(null);
+  const [startingChat, setStartingChat] = useState(false);
   const [error, setError] = useState(null);
 
-  const fetchRooms = async () => {
-    setLoading(true);
+  const fetchChats = useCallback(async () => {
+    setLoadingChats(true);
     try {
-      const data = await apiRequest('/api/rooms', { method: 'GET' });
-      setRooms(data.rooms || []);
+      const data = await apiRequest('/api/chats', { method: 'GET' });
+      setChats(data.chats || []);
+      setError(null);
     } catch (err) {
       setError(err.message);
     } finally {
-      setLoading(false);
+      setLoadingChats(false);
     }
-  };
-
-  useEffect(() => {
-    fetchRooms();
   }, []);
 
-  const handleCreateRoom = async () => {
-    const newRoomId = crypto.randomUUID().slice(0, 8).toUpperCase();
-    setCreating(true);
+  useEffect(() => {
+    fetchChats();
+  }, [fetchChats]);
+
+  useEffect(() => {
+    if (!query.trim()) {
+      setSearchResults([]);
+      setSearchError(null);
+      setSearching(false);
+      return;
+    }
+    const controller = new AbortController();
+    const handler = setTimeout(async () => {
+      setSearching(true);
+      setSearchError(null);
+      try {
+        const data = await apiRequest(`/api/users/search?query=${encodeURIComponent(query.trim())}`, {
+          method: 'GET',
+          signal: controller.signal,
+        });
+        setSearchResults(data.users || []);
+      } catch (err) {
+        if (err.name !== 'AbortError') {
+          setSearchError(err.message);
+          setSearchResults([]);
+        }
+      } finally {
+        if (!controller.signal.aborted) {
+          setSearching(false);
+        }
+      }
+    }, 300);
+
+    return () => {
+      controller.abort();
+      clearTimeout(handler);
+      setSearching(false);
+    };
+  }, [query]);
+
+  const handleStartChat = async (username) => {
+    if (!username || startingChat) return;
+    setStartingChat(true);
     setError(null);
     try {
-      await apiRequest('/api/rooms', {
+      const data = await apiRequest('/api/chats', {
         method: 'POST',
-        body: JSON.stringify({ roomId: newRoomId }),
+        body: JSON.stringify({ username }),
       });
-      navigate(`/room/${newRoomId}`);
+      if (data.chat?.id) {
+        await fetchChats();
+        setQuery('');
+        setSearchResults([]);
+        navigate(`/chat/${data.chat.id}`);
+      }
     } catch (err) {
       setError(err.message);
     } finally {
-      setCreating(false);
+      setStartingChat(false);
     }
-  };
-
-  const handleJoinRoom = (event) => {
-    event.preventDefault();
-    if (!roomId.trim()) return;
-    navigate(`/room/${roomId.trim()}`);
   };
 
   return (
@@ -72,76 +111,99 @@ const Dashboard = () => {
 
         <div className="grid lg:grid-cols-3 gap-8">
           <div className="lg:col-span-2 space-y-6">
-            <div className="rounded-3xl border border-white/10 bg-white/5 backdrop-blur-xl p-6 shadow-2xl">
-              <h2 className="text-xl font-semibold mb-4">Новый чат</h2>
-              <div className="flex flex-col md:flex-row gap-4">
-                <button
-                  onClick={handleCreateRoom}
-                  disabled={creating}
-                  className="flex-1 py-3 rounded-2xl bg-indigo-500 hover:bg-indigo-400 transition font-semibold shadow-lg shadow-indigo-500/40 disabled:opacity-60"
-                >
-                  {creating ? 'Создаем комнату...' : 'Создать новую комнату'}
-                </button>
-                <form className="flex-1 flex gap-2" onSubmit={handleJoinRoom}>
-                  <input
-                    type="text"
-                    placeholder="Введите код комнаты"
-                    value={roomId}
-                    onChange={(event) => setRoomId(event.target.value.toUpperCase())}
-                  className="flex-1 px-4 py-3 rounded-2xl bg-slate-900/60 border border-white/10 text-white focus:outline-none focus:ring-2 focus:ring-indigo-400/40"
-                  />
-                  <button
-                    type="submit"
-                    className="px-5 py-3 rounded-2xl bg-white/10 hover:bg-white/20 transition font-semibold"
-                  >
-                    Войти
-                  </button>
-                </form>
+            <div className="rounded-3xl border border-white/10 bg-white/5 backdrop-blur-xl p-6 shadow-2xl space-y-4">
+              <div>
+                <h2 className="text-xl font-semibold">Найти собеседника</h2>
+                <p className="text-sm text-slate-300 mt-2">
+                  Начните диалог, найдя пользователя по логину. Можно вводить часть логина, чтобы увидеть совпадения.
+                </p>
               </div>
-              {error && <p className="text-sm text-rose-300 mt-4">{error}</p>}
+              <div className="relative">
+                <input
+                  type="text"
+                  value={query}
+                  onChange={(event) => setQuery(event.target.value)}
+                  placeholder="Введите логин пользователя"
+                  className="w-full px-4 py-3 rounded-2xl bg-slate-900/60 border border-white/10 text-white focus:outline-none focus:ring-2 focus:ring-indigo-400/40"
+                />
+                {searching && (
+                  <span className="absolute right-4 top-1/2 -translate-y-1/2 text-xs text-indigo-300">Поиск...</span>
+                )}
+              </div>
+              {searchError && <p className="text-sm text-rose-300">{searchError}</p>}
+              {query.trim() && !searching && searchResults.length === 0 && !searchError && (
+                <p className="text-sm text-slate-400">Не найдено пользователей с таким логином.</p>
+              )}
+              {searchResults.length > 0 && (
+                <ul className="space-y-3">
+                  {searchResults.map((item) => (
+                    <li
+                      key={item.id}
+                      className="flex items-center justify-between px-4 py-3 rounded-2xl bg-slate-900/60 border border-white/10"
+                    >
+                      <div>
+                        <p className="font-semibold">{item.username}</p>
+                        <p className="text-xs text-slate-400 mt-1">Личная переписка</p>
+                      </div>
+                      <button
+                        onClick={() => handleStartChat(item.username)}
+                        disabled={startingChat}
+                        className="px-4 py-2 rounded-full bg-indigo-500/80 hover:bg-indigo-400 transition text-sm disabled:opacity-60"
+                      >
+                        {startingChat ? 'Создаем...' : 'Начать чат'}
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+              {error && <p className="text-sm text-rose-300">{error}</p>}
             </div>
 
             <div className="rounded-3xl border border-white/10 bg-white/5 backdrop-blur-xl p-6 shadow-2xl">
               <div className="flex items-center justify-between mb-4">
                 <h2 className="text-xl font-semibold">Недавние чаты</h2>
                 <button
-                  onClick={fetchRooms}
+                  onClick={fetchChats}
                   className="text-sm text-indigo-300 hover:text-indigo-200 transition"
                 >
                   Обновить
                 </button>
               </div>
-              {loading ? (
-                <p className="text-slate-300">Загружаем список комнат...</p>
-              ) : rooms.length === 0 ? (
+              {loadingChats ? (
+                <p className="text-slate-300">Загружаем список диалогов...</p>
+              ) : chats.length === 0 ? (
                 <p className="text-slate-400">У вас пока нет диалогов. Создайте первый чат!</p>
               ) : (
                 <ul className="space-y-3">
-                  {rooms.map((room) => (
+                  {chats.map((chat) => (
                     <li
-                      key={room.id}
+                      key={chat.id}
                       className="flex items-center justify-between px-4 py-3 rounded-2xl bg-slate-900/60 border border-white/10"
                     >
                       <div>
-                        <p className="font-medium">Чат {room.id}</p>
-                        {room.last_sender ? (
+                        <p className="font-medium">
+                          {chat.partner?.username ? `Чат с ${chat.partner.username}` : `Чат ${chat.id}`}
+                        </p>
+                        {chat.last_sender ? (
                           <p className="text-xs text-slate-300 mt-1">
-                            <span className="font-semibold text-indigo-200">{room.last_sender}</span>:{' '}
-                            {(room.last_message || 'нет сообщений').slice(0, 80)}
-                            {room.last_message && room.last_message.length > 80 ? '…' : ''}
+                            <span className="font-semibold text-indigo-200">{chat.last_sender}</span>:{' '}
+                            {(chat.last_message || 'нет сообщений').slice(0, 80)}
+                            {chat.last_message && chat.last_message.length > 80 ? '…' : ''}
                           </p>
                         ) : (
                           <p className="text-xs text-slate-400 mt-1">Сообщений пока нет</p>
                         )}
                         <p className="text-[11px] text-slate-500 mt-1">
                           Обновлено{' '}
-                          {room.last_timestamp
-                            ? new Date(Number(room.last_timestamp)).toLocaleString()
-                            : new Date(room.created_at).toLocaleString()}
+                          {chat.last_timestamp
+                            ? new Date(Number(chat.last_timestamp)).toLocaleString()
+                            : chat.created_at
+                            ? new Date(chat.created_at).toLocaleString()
+                            : ''}
                         </p>
                       </div>
                       <button
-                        onClick={() => navigate(`/room/${room.id}`)}
+                        onClick={() => navigate(`/chat/${chat.id}`)}
                         className="px-4 py-2 rounded-full bg-indigo-500/80 hover:bg-indigo-400 transition text-sm"
                       >
                         Открыть чат
@@ -159,16 +221,16 @@ const Dashboard = () => {
               <ul className="space-y-2 text-sm text-slate-300">
                 <li>Используйте гарнитуру для лучшего звука.</li>
                 <li>Включите доску, когда нужно визуализировать идеи.</li>
-                <li>Отправляйте документы напрямую в комнату.</li>
+                <li>Отправляйте документы напрямую в чат.</li>
               </ul>
             </div>
             <div className="rounded-3xl border border-white/10 bg-white/5 p-6">
-              <h3 className="text-lg font-semibold mb-3">Поделиться комнатой</h3>
+              <h3 className="text-lg font-semibold mb-3">Как начать общение</h3>
               <p className="text-sm text-slate-300 mb-4">
-                Сообщите коллегам код комнаты — они смогут подключиться и работать вместе с вами.
+                Найдите коллегу по логину и отправьте первое сообщение. Из чата можно запустить звонок или поделиться файлами, когда это потребуется.
               </p>
               <div className="text-xs text-slate-400">
-                Аккаунты защищены токенами, а комнаты активируются только после вашего входа.
+                Диалоги защищены авторизацией, а доступ к звонкам и доске открыт только по запросу участников.
               </div>
             </div>
           </aside>

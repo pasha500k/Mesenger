@@ -42,6 +42,16 @@ db.exec(`
 `);
 
 db.exec(`
+  CREATE TABLE IF NOT EXISTS direct_chats (
+    id TEXT PRIMARY KEY,
+    user_one INTEGER NOT NULL,
+    user_two INTEGER NOT NULL,
+    created_at INTEGER NOT NULL,
+    UNIQUE(user_one, user_two)
+  );
+`);
+
+db.exec(`
   CREATE TABLE IF NOT EXISTS messages (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     room_id TEXT NOT NULL,
@@ -78,32 +88,9 @@ const ensureAuth = (req, res, next) => {
 
 const createUserStmt = db.prepare('INSERT INTO users (username, password_hash) VALUES (?, ?)');
 const findUserStmt = db.prepare('SELECT id, username, password_hash FROM users WHERE username = ?');
-const listRoomsStmt = db.prepare(`
-  SELECT
-    r.id,
-    r.created_at,
-    (
-      SELECT sender_name FROM messages WHERE room_id = r.id ORDER BY created_at DESC, id DESC LIMIT 1
-    ) AS last_sender,
-    (
-      SELECT type FROM messages WHERE room_id = r.id ORDER BY created_at DESC, id DESC LIMIT 1
-    ) AS last_type,
-    (
-      SELECT content FROM messages WHERE room_id = r.id ORDER BY created_at DESC, id DESC LIMIT 1
-    ) AS last_content,
-    (
-      SELECT attachment_path FROM messages WHERE room_id = r.id ORDER BY created_at DESC, id DESC LIMIT 1
-    ) AS last_attachment,
-    (
-      SELECT metadata FROM messages WHERE room_id = r.id ORDER BY created_at DESC, id DESC LIMIT 1
-    ) AS last_metadata,
-    (
-      SELECT created_at FROM messages WHERE room_id = r.id ORDER BY created_at DESC, id DESC LIMIT 1
-    ) AS last_timestamp
-  FROM rooms r
-  ORDER BY COALESCE(last_timestamp, strftime('%s', r.created_at) * 1000) DESC
-  LIMIT 50
-`);
+const searchUsersStmt = db.prepare(
+  'SELECT id, username FROM users WHERE username LIKE ? AND id != ? ORDER BY username ASC LIMIT 10'
+);
 const upsertRoomStmt = db.prepare('INSERT OR IGNORE INTO rooms (id) VALUES (?)');
 const insertMessageStmt = db.prepare(
   'INSERT INTO messages (room_id, sender_id, sender_name, type, content, attachment_path, metadata, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
@@ -113,6 +100,70 @@ const getMessageByIdStmt = db.prepare(
 );
 const listRoomMessagesStmt = db.prepare(
   'SELECT id, room_id, sender_name, type, content, attachment_path, metadata, created_at FROM messages WHERE room_id = ? ORDER BY created_at ASC LIMIT 200'
+);
+const ensureChatAccessStmt = db.prepare(
+  'SELECT id, user_one, user_two FROM direct_chats WHERE id = ? AND (user_one = ? OR user_two = ?)'
+);
+const listChatsForUserStmt = db.prepare(`
+  SELECT
+    dc.id,
+    dc.created_at,
+    CASE WHEN dc.user_one = ? THEN dc.user_two ELSE dc.user_one END AS partner_id,
+    u.username AS partner_username,
+    (
+      SELECT sender_name FROM messages WHERE room_id = dc.id ORDER BY created_at DESC, id DESC LIMIT 1
+    ) AS last_sender,
+    (
+      SELECT type FROM messages WHERE room_id = dc.id ORDER BY created_at DESC, id DESC LIMIT 1
+    ) AS last_type,
+    (
+      SELECT content FROM messages WHERE room_id = dc.id ORDER BY created_at DESC, id DESC LIMIT 1
+    ) AS last_content,
+    (
+      SELECT attachment_path FROM messages WHERE room_id = dc.id ORDER BY created_at DESC, id DESC LIMIT 1
+    ) AS last_attachment,
+    (
+      SELECT metadata FROM messages WHERE room_id = dc.id ORDER BY created_at DESC, id DESC LIMIT 1
+    ) AS last_metadata,
+    (
+      SELECT created_at FROM messages WHERE room_id = dc.id ORDER BY created_at DESC, id DESC LIMIT 1
+    ) AS last_timestamp
+  FROM direct_chats dc
+  JOIN users u ON u.id = CASE WHEN dc.user_one = ? THEN dc.user_two ELSE dc.user_one END
+  WHERE dc.user_one = ? OR dc.user_two = ?
+  ORDER BY COALESCE(last_timestamp, dc.created_at) DESC
+  LIMIT 100
+`);
+const getChatSummaryStmt = db.prepare(`
+  SELECT
+    dc.id,
+    dc.created_at,
+    CASE WHEN dc.user_one = ? THEN dc.user_two ELSE dc.user_one END AS partner_id,
+    u.username AS partner_username,
+    (
+      SELECT sender_name FROM messages WHERE room_id = dc.id ORDER BY created_at DESC, id DESC LIMIT 1
+    ) AS last_sender,
+    (
+      SELECT type FROM messages WHERE room_id = dc.id ORDER BY created_at DESC, id DESC LIMIT 1
+    ) AS last_type,
+    (
+      SELECT content FROM messages WHERE room_id = dc.id ORDER BY created_at DESC, id DESC LIMIT 1
+    ) AS last_content,
+    (
+      SELECT attachment_path FROM messages WHERE room_id = dc.id ORDER BY created_at DESC, id DESC LIMIT 1
+    ) AS last_attachment,
+    (
+      SELECT metadata FROM messages WHERE room_id = dc.id ORDER BY created_at DESC, id DESC LIMIT 1
+    ) AS last_metadata,
+    (
+      SELECT created_at FROM messages WHERE room_id = dc.id ORDER BY created_at DESC, id DESC LIMIT 1
+    ) AS last_timestamp
+  FROM direct_chats dc
+  JOIN users u ON u.id = CASE WHEN dc.user_one = ? THEN dc.user_two ELSE dc.user_one END
+  WHERE dc.id = ? AND (dc.user_one = ? OR dc.user_two = ?)
+`);
+const createChatStmt = db.prepare(
+  'INSERT OR IGNORE INTO direct_chats (id, user_one, user_two, created_at) VALUES (?, ?, ?, ?)'
 );
 
 const formatMessage = (row) => {
@@ -135,6 +186,40 @@ const formatMessage = (row) => {
     metadata,
     timestamp: row.created_at,
   };
+};
+
+const formatChatSummary = (row) => {
+  if (!row) return null;
+  let metadata = null;
+  if (row.last_metadata) {
+    try {
+      metadata = JSON.parse(row.last_metadata);
+    } catch (err) {
+      metadata = null;
+    }
+  }
+  const createdAt = typeof row.created_at === 'number' ? row.created_at : Number(row.created_at);
+  return {
+    id: row.id,
+    created_at: Number.isNaN(createdAt) ? null : createdAt,
+    partner: row.partner_id
+      ? {
+          id: row.partner_id,
+          username: row.partner_username,
+        }
+      : null,
+    last_message: row.last_type === 'audio' ? '[Голосовое сообщение]' : row.last_content || null,
+    last_sender: row.last_sender || null,
+    last_type: row.last_type || null,
+    last_attachment: row.last_attachment || null,
+    last_metadata: metadata,
+    last_timestamp: row.last_timestamp ? Number(row.last_timestamp) : null,
+  };
+};
+
+const getChatIdForUsers = (firstId, secondId) => {
+  const [a, b] = [Number(firstId), Number(secondId)].sort((x, y) => x - y);
+  return `chat_${a}_${b}`;
 };
 
 app.post('/api/auth/register', async (req, res) => {
@@ -205,52 +290,104 @@ app.get('/api/auth/me', ensureAuth, (req, res) => {
   res.json({ id: req.user.id, username: req.user.username });
 });
 
-app.get('/api/rooms', ensureAuth, (req, res) => {
-  const rooms = listRoomsStmt.all().map((room) => {
-    let metadata = null;
-    if (room.last_metadata) {
-      try {
-        metadata = JSON.parse(room.last_metadata);
-      } catch (err) {
-        metadata = null;
-      }
-    }
-    return {
-      id: room.id,
-      created_at: room.created_at,
-      last_message: room.last_type === 'audio' ? '[Голосовое сообщение]' : room.last_content || null,
-      last_sender: room.last_sender || null,
-      last_type: room.last_type || null,
-      last_attachment: room.last_attachment || null,
-      last_metadata: metadata,
-      last_timestamp: room.last_timestamp ? Number(room.last_timestamp) : null,
-    };
-  });
-  res.json({ rooms });
-});
-
-app.post('/api/rooms', ensureAuth, (req, res) => {
-  const { roomId } = req.body;
-  if (!roomId) {
-    return res.status(400).json({ message: 'Room id is required' });
+app.get('/api/users/search', ensureAuth, (req, res) => {
+  const query = req.query.query?.trim();
+  if (!query) {
+    return res.json({ users: [] });
   }
   try {
-    upsertRoomStmt.run(roomId);
-    res.status(201).json({ id: roomId });
+    const cleaned = query.replace(/[%_]/g, '');
+    if (!cleaned) {
+      return res.json({ users: [] });
+    }
+    const term = `%${cleaned}%`;
+    const results = searchUsersStmt.all(term, req.user.id).map((row) => ({
+      id: row.id,
+      username: row.username,
+    }));
+    res.json({ users: results });
   } catch (err) {
-    console.error('Room creation error', err);
+    console.error('User search error', err);
     res.status(500).json({ message: 'Internal server error' });
   }
 });
 
-app.get('/api/rooms/:roomId/messages', ensureAuth, (req, res) => {
-  const { roomId } = req.params;
-  if (!roomId) {
-    return res.status(400).json({ message: 'Room id is required' });
+app.get('/api/chats', ensureAuth, (req, res) => {
+  try {
+    const rows = listChatsForUserStmt.all(req.user.id, req.user.id, req.user.id, req.user.id);
+    const chats = rows.map((row) => formatChatSummary(row));
+    res.json({ chats });
+  } catch (err) {
+    console.error('List chats error', err);
+    res.status(500).json({ message: 'Internal server error' });
+  }
+});
+
+app.post('/api/chats', ensureAuth, (req, res) => {
+  const { username } = req.body || {};
+  if (!username) {
+    return res.status(400).json({ message: 'Username is required' });
+  }
+  if (username === req.user.username) {
+    return res.status(400).json({ message: 'Нельзя начать чат с самим собой' });
   }
   try {
+    const otherUser = findUserStmt.get(username);
+    if (!otherUser) {
+      return res.status(404).json({ message: 'Пользователь не найден' });
+    }
+    const chatId = getChatIdForUsers(req.user.id, otherUser.id);
+    const createdAt = Date.now();
+    createChatStmt.run(chatId, Math.min(req.user.id, otherUser.id), Math.max(req.user.id, otherUser.id), createdAt);
+    upsertRoomStmt.run(chatId);
+    const detail = getChatSummaryStmt.get(
+      req.user.id,
+      req.user.id,
+      chatId,
+      req.user.id,
+      req.user.id
+    );
+    const formatted = detail ? formatChatSummary(detail) : null;
+    if (!formatted) {
+      return res.status(500).json({ message: 'Не удалось создать чат' });
+    }
+    res.status(201).json({ chat: formatted });
+  } catch (err) {
+    console.error('Create chat error', err);
+    res.status(500).json({ message: 'Internal server error' });
+  }
+});
+
+app.get('/api/chats/:chatId', ensureAuth, (req, res) => {
+  const { chatId } = req.params;
+  if (!chatId) {
+    return res.status(400).json({ message: 'Chat id is required' });
+  }
+  try {
+    const detail = getChatSummaryStmt.get(req.user.id, req.user.id, chatId, req.user.id, req.user.id);
+    if (!detail) {
+      return res.status(404).json({ message: 'Чат не найден' });
+    }
+    const summary = formatChatSummary(detail);
+    res.json({ chat: summary });
+  } catch (err) {
+    console.error('Get chat detail error', err);
+    res.status(500).json({ message: 'Internal server error' });
+  }
+});
+
+app.get('/api/chats/:chatId/messages', ensureAuth, (req, res) => {
+  const { chatId } = req.params;
+  if (!chatId) {
+    return res.status(400).json({ message: 'Chat id is required' });
+  }
+  try {
+    const detail = ensureChatAccessStmt.get(chatId, req.user.id, req.user.id);
+    if (!detail) {
+      return res.status(404).json({ message: 'Чат не найден' });
+    }
     const messages = listRoomMessagesStmt
-      .all(roomId)
+      .all(chatId)
       .map((row) => ({
         ...formatMessage(row),
         audioUrl: row.type === 'audio' && row.attachment_path ? `/uploads/${row.attachment_path}` : null,
@@ -271,7 +408,7 @@ const io = new Server(server, {
   },
 });
 
-const roomsState = new Map();
+const chatsState = new Map();
 
 const getUserFromToken = (token) => {
   if (!token) return null;
@@ -308,11 +445,15 @@ io.use((socket, next) => {
 });
 
 io.on('connection', (socket) => {
-  socket.on('joinRoom', ({ roomId, displayName }) => {
-    if (!roomId) return;
-    upsertRoomStmt.run(roomId);
-    socket.join(roomId);
-    const room = roomsState.get(roomId) || {
+  socket.on('joinChat', ({ chatId, displayName }) => {
+    if (!chatId) return;
+    const chat = ensureChatAccessStmt.get(chatId, socket.user.id, socket.user.id);
+    if (!chat) {
+      return;
+    }
+    upsertRoomStmt.run(chatId);
+    socket.join(chatId);
+    const room = chatsState.get(chatId) || {
       participants: new Map(),
       callActive: false,
       boardEnabled: false,
@@ -322,34 +463,36 @@ io.on('connection', (socket) => {
       username: socket.user.username,
       displayName: displayName || socket.user.username,
     });
-    roomsState.set(roomId, room);
+    chatsState.set(chatId, room);
 
-    io.to(roomId).emit('participantsUpdate', Array.from(room.participants.values()));
+    io.to(chatId).emit('participantsUpdate', Array.from(room.participants.values()));
     socket.emit('callStatus', { callActive: room.callActive, boardEnabled: room.boardEnabled });
   });
 
-  socket.on('leaveRoom', ({ roomId }) => {
-    if (!roomId) return;
-    socket.leave(roomId);
-    const room = roomsState.get(roomId);
+  socket.on('leaveChat', ({ chatId }) => {
+    if (!chatId) return;
+    socket.leave(chatId);
+    const room = chatsState.get(chatId);
     if (room) {
       room.participants.delete(socket.id);
       if (room.participants.size === 0) {
-        roomsState.delete(roomId);
+        chatsState.delete(chatId);
       } else {
-        io.to(roomId).emit('participantsUpdate', Array.from(room.participants.values()));
+        io.to(chatId).emit('participantsUpdate', Array.from(room.participants.values()));
       }
     }
   });
 
-  socket.on('chatMessage', ({ roomId, message }) => {
-    if (!roomId || typeof message !== 'string') return;
+  socket.on('chatMessage', ({ chatId, message }) => {
+    if (!chatId || typeof message !== 'string') return;
+    const room = chatsState.get(chatId);
+    if (!room || !room.participants.has(socket.id)) return;
     const trimmed = message.trim();
     if (!trimmed) return;
     try {
       const createdAt = Date.now();
       const info = insertMessageStmt.run(
-        roomId,
+        chatId,
         socket.user.id,
         socket.user.username,
         'text',
@@ -360,7 +503,7 @@ io.on('connection', (socket) => {
       );
       const stored = formatMessage(getMessageByIdStmt.get(info.lastInsertRowid));
       if (stored) {
-        io.to(roomId).emit('chatMessage', {
+        io.to(chatId).emit('chatMessage', {
           ...stored,
           audioUrl: null,
         });
@@ -370,8 +513,10 @@ io.on('connection', (socket) => {
     }
   });
 
-  socket.on('voiceMessage', ({ roomId, audioData, duration }) => {
-    if (!roomId || !audioData) return;
+  socket.on('voiceMessage', ({ chatId, audioData, duration }) => {
+    if (!chatId || !audioData) return;
+    const room = chatsState.get(chatId);
+    if (!room || !room.participants.has(socket.id)) return;
     try {
       const createdAt = Date.now();
       let mimeType = 'audio/webm';
@@ -389,7 +534,7 @@ io.on('connection', (socket) => {
       fs.writeFileSync(absolutePath, buffer);
       const metadata = JSON.stringify({ duration: duration ?? null, mimeType });
       const info = insertMessageStmt.run(
-        roomId,
+        chatId,
         socket.user.id,
         socket.user.username,
         'audio',
@@ -400,7 +545,7 @@ io.on('connection', (socket) => {
       );
       const stored = formatMessage(getMessageByIdStmt.get(info.lastInsertRowid));
       if (stored) {
-        io.to(roomId).emit('chatMessage', {
+        io.to(chatId).emit('chatMessage', {
           ...stored,
           audioUrl: `/uploads/${relativePath}`,
         });
@@ -410,71 +555,75 @@ io.on('connection', (socket) => {
     }
   });
 
-  socket.on('startCall', ({ roomId }) => {
-    if (!roomId) return;
-    const room = roomsState.get(roomId);
+  socket.on('startCall', ({ chatId }) => {
+    if (!chatId) return;
+    const room = chatsState.get(chatId);
     if (room) {
       room.callActive = true;
-      io.to(roomId).emit('callStatus', { callActive: true, boardEnabled: room.boardEnabled });
+      io.to(chatId).emit('callStatus', { callActive: true, boardEnabled: room.boardEnabled });
     }
   });
 
-  socket.on('endCall', ({ roomId }) => {
-    if (!roomId) return;
-    const room = roomsState.get(roomId);
+  socket.on('endCall', ({ chatId }) => {
+    if (!chatId) return;
+    const room = chatsState.get(chatId);
     if (room) {
       room.callActive = false;
       room.boardEnabled = false;
-      io.to(roomId).emit('callStatus', { callActive: false, boardEnabled: false });
-      io.to(roomId).emit('boardClosed');
+      io.to(chatId).emit('callStatus', { callActive: false, boardEnabled: false });
+      io.to(chatId).emit('boardClosed');
     }
   });
 
-  socket.on('requestBoard', ({ roomId }) => {
-    if (!roomId) return;
-    const room = roomsState.get(roomId);
+  socket.on('requestBoard', ({ chatId }) => {
+    if (!chatId) return;
+    const room = chatsState.get(chatId);
     if (room && room.callActive) {
       room.boardEnabled = true;
-      io.to(roomId).emit('boardOpened');
+      io.to(chatId).emit('boardOpened');
     }
   });
 
-  socket.on('closeBoard', ({ roomId }) => {
-    if (!roomId) return;
-    const room = roomsState.get(roomId);
+  socket.on('closeBoard', ({ chatId }) => {
+    if (!chatId) return;
+    const room = chatsState.get(chatId);
     if (room) {
       room.boardEnabled = false;
-      io.to(roomId).emit('boardClosed');
+      io.to(chatId).emit('boardClosed');
     }
   });
 
-  socket.on('boardDraw', ({ roomId, stroke }) => {
-    if (!roomId || !stroke) return;
-    const room = roomsState.get(roomId);
+  socket.on('boardDraw', ({ chatId, stroke }) => {
+    if (!chatId || !stroke) return;
+    const room = chatsState.get(chatId);
     if (room && room.boardEnabled) {
-      socket.to(roomId).emit('boardDraw', stroke);
+      socket.to(chatId).emit('boardDraw', stroke);
     }
   });
 
-  socket.on('boardClear', ({ roomId }) => {
-    if (!roomId) return;
-    const room = roomsState.get(roomId);
+  socket.on('boardClear', ({ chatId }) => {
+    if (!chatId) return;
+    const room = chatsState.get(chatId);
     if (room && room.boardEnabled) {
-      io.to(roomId).emit('boardClear');
+      io.to(chatId).emit('boardClear');
     }
   });
 
-  socket.on('signal', ({ roomId, data, target }) => {
-    if (!roomId || !data || !target) return;
+  socket.on('signal', ({ chatId, data, target }) => {
+    if (!chatId || !data || !target) return;
+    const room = chatsState.get(chatId);
+    if (!room || !room.participants.has(socket.id)) return;
     io.to(target).emit('signal', {
       sender: socket.id,
       data,
     });
   });
 
-  socket.on('fileShare', ({ roomId, fileName, fileType, fileData }) => {
-    if (!roomId || !fileName || !fileData) return;
-    io.to(roomId).emit('fileShare', {
+  socket.on('fileShare', ({ chatId, fileName, fileType, fileData }) => {
+    if (!chatId || !fileName || !fileData) return;
+    const room = chatsState.get(chatId);
+    if (!room || !room.participants.has(socket.id)) return;
+    io.to(chatId).emit('fileShare', {
       sender: socket.user.username,
       fileName,
       fileType,
@@ -486,11 +635,11 @@ io.on('connection', (socket) => {
   socket.on('disconnecting', () => {
     const rooms = Array.from(socket.rooms).filter((roomId) => roomId !== socket.id);
     rooms.forEach((roomId) => {
-      const room = roomsState.get(roomId);
+      const room = chatsState.get(roomId);
       if (room) {
         room.participants.delete(socket.id);
         if (room.participants.size === 0) {
-          roomsState.delete(roomId);
+          chatsState.delete(roomId);
         } else {
           io.to(roomId).emit('participantsUpdate', Array.from(room.participants.values()));
         }
