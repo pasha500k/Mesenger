@@ -6,6 +6,7 @@ const cors = require('cors');
 const cookieParser = require('cookie-parser');
 const jwt = require('jsonwebtoken');
 const bcrypt = require('bcryptjs');
+const crypto = require('crypto');
 const Database = require('better-sqlite3');
 const { Server } = require('socket.io');
 
@@ -88,6 +89,30 @@ db.exec(`
   );
 `);
 
+db.exec(`
+  CREATE TABLE IF NOT EXISTS chat_preferences (
+    chat_id TEXT NOT NULL,
+    user_id INTEGER NOT NULL,
+    custom_title TEXT,
+    notifications_enabled INTEGER DEFAULT 1,
+    PRIMARY KEY (chat_id, user_id)
+  );
+`);
+
+db.exec(`
+  CREATE TABLE IF NOT EXISTS chat_invites (
+    id TEXT PRIMARY KEY,
+    chat_id TEXT NOT NULL,
+    created_by INTEGER NOT NULL,
+    created_at INTEGER NOT NULL,
+    expires_at INTEGER,
+    revoked INTEGER DEFAULT 0,
+    redeemed_by INTEGER,
+    redeemed_at INTEGER,
+    FOREIGN KEY (chat_id) REFERENCES direct_chats(id)
+  );
+`);
+
 const app = express();
 app.use(cors({
   origin: validateCorsOrigin,
@@ -113,6 +138,7 @@ const ensureAuth = (req, res, next) => {
 
 const createUserStmt = db.prepare('INSERT INTO users (username, password_hash) VALUES (?, ?)');
 const findUserStmt = db.prepare('SELECT id, username, password_hash FROM users WHERE username = ?');
+const getUserByIdStmt = db.prepare('SELECT id, username FROM users WHERE id = ?');
 const searchUsersStmt = db.prepare(
   'SELECT id, username FROM users WHERE username LIKE ? AND id != ? ORDER BY username ASC LIMIT 10'
 );
@@ -135,6 +161,8 @@ const listChatsForUserStmt = db.prepare(`
     dc.created_at,
     CASE WHEN dc.user_one = ? THEN dc.user_two ELSE dc.user_one END AS partner_id,
     u.username AS partner_username,
+    pref.custom_title AS custom_title,
+    pref.notifications_enabled AS notifications_enabled,
     (
       SELECT sender_name FROM messages WHERE room_id = dc.id ORDER BY created_at DESC, id DESC LIMIT 1
     ) AS last_sender,
@@ -155,6 +183,7 @@ const listChatsForUserStmt = db.prepare(`
     ) AS last_timestamp
   FROM direct_chats dc
   JOIN users u ON u.id = CASE WHEN dc.user_one = ? THEN dc.user_two ELSE dc.user_one END
+  LEFT JOIN chat_preferences pref ON pref.chat_id = dc.id AND pref.user_id = ?
   WHERE dc.user_one = ? OR dc.user_two = ?
   ORDER BY COALESCE(last_timestamp, dc.created_at) DESC
   LIMIT 100
@@ -165,6 +194,8 @@ const getChatSummaryStmt = db.prepare(`
     dc.created_at,
     CASE WHEN dc.user_one = ? THEN dc.user_two ELSE dc.user_one END AS partner_id,
     u.username AS partner_username,
+    pref.custom_title AS custom_title,
+    pref.notifications_enabled AS notifications_enabled,
     (
       SELECT sender_name FROM messages WHERE room_id = dc.id ORDER BY created_at DESC, id DESC LIMIT 1
     ) AS last_sender,
@@ -185,10 +216,30 @@ const getChatSummaryStmt = db.prepare(`
     ) AS last_timestamp
   FROM direct_chats dc
   JOIN users u ON u.id = CASE WHEN dc.user_one = ? THEN dc.user_two ELSE dc.user_one END
+  LEFT JOIN chat_preferences pref ON pref.chat_id = dc.id AND pref.user_id = ?
   WHERE dc.id = ? AND (dc.user_one = ? OR dc.user_two = ?)
 `);
 const createChatStmt = db.prepare(
   'INSERT OR IGNORE INTO direct_chats (id, user_one, user_two, created_at) VALUES (?, ?, ?, ?)'
+);
+const getChatRowStmt = db.prepare('SELECT id, user_one, user_two FROM direct_chats WHERE id = ?');
+const getChatPreferencesStmt = db.prepare(
+  'SELECT custom_title, notifications_enabled FROM chat_preferences WHERE chat_id = ? AND user_id = ?'
+);
+const upsertChatPreferencesStmt = db.prepare(`
+  INSERT INTO chat_preferences (chat_id, user_id, custom_title, notifications_enabled)
+  VALUES (?, ?, ?, ?)
+  ON CONFLICT(chat_id, user_id)
+  DO UPDATE SET custom_title = excluded.custom_title, notifications_enabled = excluded.notifications_enabled
+`);
+const createInviteStmt = db.prepare(
+  'INSERT INTO chat_invites (id, chat_id, created_by, created_at, expires_at) VALUES (?, ?, ?, ?, ?)'
+);
+const getInviteStmt = db.prepare(
+  'SELECT id, chat_id, created_by, created_at, expires_at, revoked, redeemed_by, redeemed_at FROM chat_invites WHERE id = ?'
+);
+const markInviteRedeemedStmt = db.prepare(
+  'UPDATE chat_invites SET revoked = 1, redeemed_by = ?, redeemed_at = ? WHERE id = ?'
 );
 
 const formatMessage = (row) => {
@@ -224,6 +275,8 @@ const formatChatSummary = (row) => {
     }
   }
   const createdAt = typeof row.created_at === 'number' ? row.created_at : Number(row.created_at);
+  const notificationsEnabled = row.notifications_enabled == null ? true : row.notifications_enabled !== 0;
+  const customTitle = row.custom_title || null;
   return {
     id: row.id,
     created_at: Number.isNaN(createdAt) ? null : createdAt,
@@ -233,6 +286,11 @@ const formatChatSummary = (row) => {
           username: row.partner_username,
         }
       : null,
+    title:
+      customTitle ||
+      (row.partner_username ? `Чат с ${row.partner_username}` : 'Личный чат'),
+    custom_title: customTitle,
+    notifications_enabled: notificationsEnabled,
     last_message: row.last_type === 'audio' ? '[Голосовое сообщение]' : row.last_content || null,
     last_sender: row.last_sender || null,
     last_type: row.last_type || null,
@@ -339,7 +397,13 @@ app.get('/api/users/search', ensureAuth, (req, res) => {
 
 app.get('/api/chats', ensureAuth, (req, res) => {
   try {
-    const rows = listChatsForUserStmt.all(req.user.id, req.user.id, req.user.id, req.user.id);
+    const rows = listChatsForUserStmt.all(
+      req.user.id,
+      req.user.id,
+      req.user.id,
+      req.user.id,
+      req.user.id
+    );
     const chats = rows.map((row) => formatChatSummary(row));
     res.json({ chats });
   } catch (err) {
@@ -368,6 +432,7 @@ app.post('/api/chats', ensureAuth, (req, res) => {
     const detail = getChatSummaryStmt.get(
       req.user.id,
       req.user.id,
+      req.user.id,
       chatId,
       req.user.id,
       req.user.id
@@ -389,7 +454,14 @@ app.get('/api/chats/:chatId', ensureAuth, (req, res) => {
     return res.status(400).json({ message: 'Chat id is required' });
   }
   try {
-    const detail = getChatSummaryStmt.get(req.user.id, req.user.id, chatId, req.user.id, req.user.id);
+    const detail = getChatSummaryStmt.get(
+      req.user.id,
+      req.user.id,
+      req.user.id,
+      chatId,
+      req.user.id,
+      req.user.id
+    );
     if (!detail) {
       return res.status(404).json({ message: 'Чат не найден' });
     }
@@ -424,6 +496,181 @@ app.get('/api/chats/:chatId/messages', ensureAuth, (req, res) => {
   }
 });
 
+app.get('/api/chats/:chatId/preferences', ensureAuth, (req, res) => {
+  const { chatId } = req.params;
+  if (!chatId) {
+    return res.status(400).json({ message: 'Chat id is required' });
+  }
+  try {
+    const detail = ensureChatAccessStmt.get(chatId, req.user.id, req.user.id);
+    if (!detail) {
+      return res.status(404).json({ message: 'Чат не найден' });
+    }
+    const prefs = getChatPreferencesStmt.get(chatId, req.user.id);
+    res.json({
+      preferences: {
+        customTitle: prefs?.custom_title || null,
+        notificationsEnabled: prefs?.notifications_enabled == null ? true : prefs.notifications_enabled !== 0,
+      },
+    });
+  } catch (err) {
+    console.error('Get chat preferences error', err);
+    res.status(500).json({ message: 'Internal server error' });
+  }
+});
+
+app.patch('/api/chats/:chatId/preferences', ensureAuth, (req, res) => {
+  const { chatId } = req.params;
+  const { customTitle, notificationsEnabled } = req.body || {};
+  if (!chatId) {
+    return res.status(400).json({ message: 'Chat id is required' });
+  }
+  try {
+    const detail = ensureChatAccessStmt.get(chatId, req.user.id, req.user.id);
+    if (!detail) {
+      return res.status(404).json({ message: 'Чат не найден' });
+    }
+    const trimmedTitle = typeof customTitle === 'string' ? customTitle.trim() : null;
+    const limitedTitle = trimmedTitle ? trimmedTitle.slice(0, 80) : null;
+    const notificationsFlag = notificationsEnabled === false ? 0 : 1;
+    upsertChatPreferencesStmt.run(chatId, req.user.id, limitedTitle, notificationsFlag);
+    res.json({
+      preferences: {
+        customTitle: limitedTitle,
+        notificationsEnabled: notificationsFlag === 1,
+      },
+    });
+  } catch (err) {
+    console.error('Update chat preferences error', err);
+    res.status(500).json({ message: 'Internal server error' });
+  }
+});
+
+app.post('/api/chats/:chatId/invitations', ensureAuth, (req, res) => {
+  const { chatId } = req.params;
+  if (!chatId) {
+    return res.status(400).json({ message: 'Chat id is required' });
+  }
+  try {
+    const chat = ensureChatAccessStmt.get(chatId, req.user.id, req.user.id);
+    if (!chat) {
+      return res.status(404).json({ message: 'Чат не найден' });
+    }
+    const token = crypto.randomUUID();
+    const createdAt = Date.now();
+    const expiresAt = createdAt + 1000 * 60 * 60 * 24 * 3;
+    createInviteStmt.run(token, chatId, req.user.id, createdAt, expiresAt);
+    res.status(201).json({
+      invite: {
+        id: token,
+        chatId,
+        createdBy: req.user.id,
+        createdAt,
+        expiresAt,
+      },
+    });
+  } catch (err) {
+    console.error('Create chat invite error', err);
+    res.status(500).json({ message: 'Internal server error' });
+  }
+});
+
+app.get('/api/invitations/:inviteId', (req, res) => {
+  const { inviteId } = req.params;
+  if (!inviteId) {
+    return res.status(400).json({ message: 'Invite id is required' });
+  }
+  try {
+    const invite = getInviteStmt.get(inviteId);
+    if (!invite) {
+      return res.status(404).json({ message: 'Приглашение не найдено' });
+    }
+    const creator = getUserByIdStmt.get(invite.created_by);
+    const now = Date.now();
+    const status = invite.revoked
+      ? 'revoked'
+      : invite.redeemed_by
+      ? 'redeemed'
+      : invite.expires_at && invite.expires_at < now
+      ? 'expired'
+      : 'active';
+    res.json({
+      invite: {
+        id: invite.id,
+        chatId: invite.chat_id,
+        createdBy: invite.created_by,
+        creatorUsername: creator?.username || null,
+        createdAt: invite.created_at,
+        expiresAt: invite.expires_at,
+        status,
+        redeemedBy: invite.redeemed_by || null,
+        redeemedAt: invite.redeemed_at || null,
+      },
+    });
+  } catch (err) {
+    console.error('Get invite error', err);
+    res.status(500).json({ message: 'Internal server error' });
+  }
+});
+
+app.post('/api/invitations/:inviteId/accept', ensureAuth, (req, res) => {
+  const { inviteId } = req.params;
+  if (!inviteId) {
+    return res.status(400).json({ message: 'Invite id is required' });
+  }
+  try {
+    const invite = getInviteStmt.get(inviteId);
+    if (!invite) {
+      return res.status(404).json({ message: 'Приглашение не найдено' });
+    }
+    const now = Date.now();
+    if (invite.revoked) {
+      return res.status(410).json({ message: 'Приглашение недействительно' });
+    }
+    if (invite.expires_at && invite.expires_at < now) {
+      return res.status(410).json({ message: 'Приглашение истекло' });
+    }
+    if (invite.redeemed_by && invite.redeemed_by !== req.user.id) {
+      return res.status(410).json({ message: 'Приглашение уже использовано' });
+    }
+    const chat = getChatRowStmt.get(invite.chat_id);
+    if (!chat) {
+      return res.status(404).json({ message: 'Чат недоступен' });
+    }
+    if (chat.user_one !== invite.created_by && chat.user_two !== invite.created_by) {
+      return res.status(410).json({ message: 'Приглашение недействительно' });
+    }
+    const inviterId = invite.created_by;
+    const targetChatId = getChatIdForUsers(inviterId, req.user.id);
+    const createdAt = Date.now();
+    createChatStmt.run(targetChatId, Math.min(inviterId, req.user.id), Math.max(inviterId, req.user.id), createdAt);
+    upsertRoomStmt.run(targetChatId);
+    markInviteRedeemedStmt.run(req.user.id, now, invite.id);
+    const detail = getChatSummaryStmt.get(
+      req.user.id,
+      req.user.id,
+      req.user.id,
+      targetChatId,
+      req.user.id,
+      req.user.id
+    );
+    const formatted = detail ? formatChatSummary(detail) : null;
+    if (!formatted) {
+      return res.status(500).json({ message: 'Не удалось открыть чат' });
+    }
+    res.json({
+      chat: formatted,
+      invite: {
+        id: invite.id,
+        status: 'redeemed',
+      },
+    });
+  } catch (err) {
+    console.error('Accept invite error', err);
+    res.status(500).json({ message: 'Internal server error' });
+  }
+});
+
 const server = http.createServer(app);
 
 const io = new Server(server, {
@@ -434,7 +681,9 @@ const io = new Server(server, {
 });
 
 const chatsState = new Map();
-const MAX_BOARD_STROKES = 1000;
+const MAX_BOARD_OBJECTS = 1000;
+
+const createEmptyBoardState = () => ({ objects: [] });
 
 const getUserFromToken = (token) => {
   if (!token) return null;
@@ -483,7 +732,7 @@ io.on('connection', (socket) => {
       participants: new Map(),
       callActive: false,
       boardEnabled: false,
-      strokes: [],
+      boardState: createEmptyBoardState(),
     };
     room.participants.set(socket.id, {
       id: socket.id,
@@ -495,7 +744,7 @@ io.on('connection', (socket) => {
     io.to(chatId).emit('participantsUpdate', Array.from(room.participants.values()));
     socket.emit('callStatus', { callActive: room.callActive, boardEnabled: room.boardEnabled });
     if (room.boardEnabled) {
-      socket.emit('boardSync', room.strokes || []);
+      socket.emit('boardSync', room.boardState || createEmptyBoardState());
     }
   });
 
@@ -600,7 +849,7 @@ io.on('connection', (socket) => {
     if (room) {
       room.callActive = false;
       room.boardEnabled = false;
-      room.strokes = [];
+      room.boardState = createEmptyBoardState();
       io.to(chatId).emit('callStatus', { callActive: false, boardEnabled: false });
       io.to(chatId).emit('boardClosed');
     }
@@ -611,8 +860,10 @@ io.on('connection', (socket) => {
     const room = chatsState.get(chatId);
     if (room && room.callActive) {
       room.boardEnabled = true;
+      room.boardState = room.boardState || createEmptyBoardState();
       io.to(chatId).emit('boardOpened');
-      io.to(chatId).emit('boardSync', room.strokes || []);
+      const snapshot = JSON.parse(JSON.stringify(room.boardState));
+      io.to(chatId).emit('boardSync', snapshot);
     }
   });
 
@@ -621,21 +872,46 @@ io.on('connection', (socket) => {
     const room = chatsState.get(chatId);
     if (room) {
       room.boardEnabled = false;
-      room.strokes = [];
+      room.boardState = createEmptyBoardState();
       io.to(chatId).emit('boardClosed');
     }
   });
 
-  socket.on('boardDraw', ({ chatId, stroke }) => {
-    if (!chatId || !stroke) return;
+  socket.on('boardAddObject', ({ chatId, object }) => {
+    if (!chatId || !object) return;
     const room = chatsState.get(chatId);
     if (room && room.boardEnabled) {
-      room.strokes = room.strokes || [];
-      room.strokes.push(stroke);
-      if (room.strokes.length > MAX_BOARD_STROKES) {
-        room.strokes.splice(0, room.strokes.length - MAX_BOARD_STROKES);
+      room.boardState = room.boardState || createEmptyBoardState();
+      const snapshot = JSON.parse(JSON.stringify(object));
+      room.boardState.objects.push(snapshot);
+      if (room.boardState.objects.length > MAX_BOARD_OBJECTS) {
+        room.boardState.objects.splice(0, room.boardState.objects.length - MAX_BOARD_OBJECTS);
       }
-      socket.to(chatId).emit('boardDraw', stroke);
+      socket.to(chatId).emit('boardAddObject', snapshot);
+    }
+  });
+
+  socket.on('boardUpdateObject', ({ chatId, objectId, updates }) => {
+    if (!chatId || !objectId || !updates) return;
+    const room = chatsState.get(chatId);
+    if (room && room.boardEnabled && room.boardState?.objects) {
+      const target = room.boardState.objects.find((item) => item.id === objectId);
+      if (target) {
+        Object.assign(target, updates);
+        socket.to(chatId).emit('boardUpdateObject', { objectId, updates });
+      }
+    }
+  });
+
+  socket.on('boardRemoveObject', ({ chatId, objectId }) => {
+    if (!chatId || !objectId) return;
+    const room = chatsState.get(chatId);
+    if (room && room.boardEnabled && room.boardState?.objects) {
+      const index = room.boardState.objects.findIndex((item) => item.id === objectId);
+      if (index !== -1) {
+        room.boardState.objects.splice(index, 1);
+        io.to(chatId).emit('boardRemoveObject', { objectId });
+      }
     }
   });
 
@@ -643,8 +919,19 @@ io.on('connection', (socket) => {
     if (!chatId) return;
     const room = chatsState.get(chatId);
     if (room && room.boardEnabled) {
-      room.strokes = [];
+      room.boardState = createEmptyBoardState();
       io.to(chatId).emit('boardClear');
+    }
+  });
+
+  socket.on('boardRequestSync', ({ chatId }) => {
+    if (!chatId) return;
+    const room = chatsState.get(chatId);
+    if (room && room.boardEnabled) {
+      const snapshot = room.boardState
+        ? JSON.parse(JSON.stringify(room.boardState))
+        : createEmptyBoardState();
+      socket.emit('boardSync', snapshot);
     }
   });
 

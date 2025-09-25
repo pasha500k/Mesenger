@@ -9,6 +9,7 @@ import ParticipantsList from '../components/ParticipantsList';
 import ControlsBar from '../components/ControlsBar';
 import VideoGrid from '../components/VideoGrid';
 import Whiteboard from '../components/Whiteboard';
+import ChatSettings from '../components/ChatSettings';
 import { apiRequest } from '../api';
 import LoadingScreen from '../components/LoadingScreen';
 
@@ -51,7 +52,7 @@ const Chat = () => {
   const [files, setFiles] = useState([]);
   const [callActive, setCallActive] = useState(false);
   const [boardOpen, setBoardOpen] = useState(false);
-  const [boardStrokes, setBoardStrokes] = useState([]);
+  const [boardObjects, setBoardObjects] = useState([]);
   const [localStream, setLocalStream] = useState(null);
   const [remoteStreams, setRemoteStreams] = useState([]);
   const [socketReady, setSocketReady] = useState(false);
@@ -63,6 +64,15 @@ const Chat = () => {
   const [chatInfo, setChatInfo] = useState(null);
   const [chatInfoError, setChatInfoError] = useState(null);
   const [loadingChat, setLoadingChat] = useState(true);
+  const [preferences, setPreferences] = useState({ customTitle: null, notificationsEnabled: true });
+  const [preferencesLoading, setPreferencesLoading] = useState(true);
+  const [preferencesError, setPreferencesError] = useState(null);
+  const [generatingInvite, setGeneratingInvite] = useState(false);
+  const [inviteInfo, setInviteInfo] = useState(null);
+  const notificationsSupported = typeof window !== 'undefined' && 'Notification' in window;
+  const [notificationPermission, setNotificationPermission] = useState(
+    notificationsSupported ? Notification.permission : 'default'
+  );
 
   const socketRef = useRef(null);
   const peersRef = useRef(new Map());
@@ -70,6 +80,7 @@ const Chat = () => {
   const participantsRef = useRef([]);
   const localStreamRef = useRef(null);
   const selfIdRef = useRef(null);
+  const boardStateRef = useRef([]);
 
   const addTracksToPeer = useCallback((peerConnection, stream) => {
     if (!peerConnection || !stream) return;
@@ -93,6 +104,138 @@ const Chat = () => {
     },
     [addTracksToPeer]
   );
+
+  const updateBoardObjects = useCallback((updater) => {
+    setBoardObjects((prev) => {
+      const next = updater(prev);
+      boardStateRef.current = next;
+      return next;
+    });
+  }, []);
+
+  const maybeNotify = useCallback(
+    (message) => {
+      if (!notificationsSupported) return;
+      if (!preferences.notificationsEnabled) return;
+      if (!message || message.sender === user?.username) return;
+      if (typeof document !== 'undefined' && document.visibilityState !== 'hidden') return;
+      if (notificationPermission !== 'granted') return;
+      const fallbackTitle =
+        chatInfo?.title ||
+        (chatInfo?.partner?.username ? `Чат с ${chatInfo.partner.username}` : 'Новый чат');
+      const title = preferences.customTitle || fallbackTitle;
+      const body = message.type === 'audio' ? 'Голосовое сообщение' : message.message || 'Новое сообщение';
+      try {
+        new Notification(title, {
+          body,
+          tag: `chat-${chatId}`,
+        });
+      } catch (err) {
+        console.error('Не удалось показать уведомление', err);
+      }
+    },
+    [
+      notificationsSupported,
+      preferences.notificationsEnabled,
+      preferences.customTitle,
+      notificationPermission,
+      chatInfo?.title,
+      chatInfo?.partner?.username,
+      chatId,
+      user?.username,
+    ]
+  );
+
+  const requestNotificationPermission = useCallback(async () => {
+    if (!notificationsSupported) return notificationPermission;
+    try {
+      const result = await Notification.requestPermission();
+      setNotificationPermission(result);
+      return result;
+    } catch (err) {
+      console.error('Не удалось запросить разрешение на уведомления', err);
+      return notificationPermission;
+    }
+  }, [notificationPermission, notificationsSupported]);
+
+  const persistPreferences = useCallback(
+    async (changes = {}) => {
+      if (!chatId) return null;
+      const payload = {
+        customTitle:
+          Object.prototype.hasOwnProperty.call(changes, 'customTitle')
+            ? changes.customTitle
+            : preferences.customTitle,
+        notificationsEnabled:
+          Object.prototype.hasOwnProperty.call(changes, 'notificationsEnabled')
+            ? changes.notificationsEnabled
+            : preferences.notificationsEnabled,
+      };
+      try {
+        const data = await apiRequest(`/api/chats/${chatId}/preferences`, {
+          method: 'PATCH',
+          body: JSON.stringify(payload),
+        });
+        const prefs = data?.preferences || {};
+        setPreferences({
+          customTitle: prefs.customTitle || null,
+          notificationsEnabled:
+            prefs.notificationsEnabled == null ? true : Boolean(prefs.notificationsEnabled),
+        });
+        setPreferencesError(null);
+        return { success: true, preferences: prefs };
+      } catch (err) {
+        setPreferencesError(err.message);
+        return { success: false, error: err.message };
+      }
+    },
+    [chatId, preferences.customTitle, preferences.notificationsEnabled]
+  );
+
+  const handleRenameChat = useCallback(
+    async (title) => {
+      await persistPreferences({ customTitle: title });
+    },
+    [persistPreferences]
+  );
+
+  const handleNotificationsChange = useCallback(
+    async (enabled) => {
+      let nextValue = enabled;
+      if (nextValue && notificationPermission !== 'granted') {
+        const result = await requestNotificationPermission();
+        if (result !== 'granted') {
+          setPreferencesError('Уведомления заблокированы браузером. Разрешите их в настройках.');
+          nextValue = false;
+        }
+      }
+      await persistPreferences({ notificationsEnabled: nextValue });
+    },
+    [notificationPermission, persistPreferences, requestNotificationPermission]
+  );
+
+  const handleGenerateInvite = useCallback(async () => {
+    if (!chatId) return;
+    setGeneratingInvite(true);
+    setInviteInfo((prev) => (prev ? { ...prev, error: null } : null));
+    try {
+      const data = await apiRequest(`/api/chats/${chatId}/invitations`, {
+        method: 'POST',
+      });
+      const invite = data?.invite;
+      if (invite) {
+        const link =
+          typeof window !== 'undefined'
+            ? `${window.location.origin}/invite/${invite.id}`
+            : `/invite/${invite.id}`;
+        setInviteInfo({ ...invite, link, error: null });
+      }
+    } catch (err) {
+      setInviteInfo({ error: err.message });
+    } finally {
+      setGeneratingInvite(false);
+    }
+  }, [chatId]);
 
   useEffect(() => {
     let active = true;
@@ -148,6 +291,40 @@ const Chat = () => {
       .finally(() => {
         if (!active) return;
         setLoadingHistory(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [chatId, loadingChat, chatInfoError]);
+
+  useEffect(() => {
+    setInviteInfo(null);
+  }, [chatId]);
+
+  useEffect(() => {
+    if (!chatId || loadingChat || chatInfoError) {
+      return;
+    }
+    let active = true;
+    setPreferencesLoading(true);
+    setPreferencesError(null);
+    apiRequest(`/api/chats/${chatId}/preferences`, { method: 'GET' })
+      .then((data) => {
+        if (!active) return;
+        const prefs = data?.preferences || {};
+        setPreferences({
+          customTitle: prefs.customTitle || null,
+          notificationsEnabled:
+            prefs.notificationsEnabled == null ? true : Boolean(prefs.notificationsEnabled),
+        });
+      })
+      .catch((err) => {
+        if (!active) return;
+        setPreferencesError(err.message);
+      })
+      .finally(() => {
+        if (!active) return;
+        setPreferencesLoading(false);
       });
     return () => {
       active = false;
@@ -336,6 +513,7 @@ const Chat = () => {
       const normalized = normalizeMessage(message, API_BASE_URL);
       if (normalized) {
         setMessages((prev) => [...prev, normalized]);
+        maybeNotify(normalized);
       }
     });
 
@@ -345,12 +523,12 @@ const Chat = () => {
       if (!active) {
         stopLocalMedia();
         cleanupConnections();
-        setBoardStrokes([]);
+        updateBoardObjects(() => []);
         setMicMuted(false);
         setCameraOff(false);
       }
       if (!boardEnabled) {
-        setBoardStrokes([]);
+        updateBoardObjects(() => []);
       }
     });
 
@@ -360,20 +538,40 @@ const Chat = () => {
 
     socket.on('boardClosed', () => {
       setBoardOpen(false);
-      setBoardStrokes([]);
+      updateBoardObjects(() => []);
     });
 
-    socket.on('boardDraw', (stroke) => {
-      setBoardStrokes((prev) => [...prev, stroke]);
+    socket.on('boardAddObject', (object) => {
+      if (!object || !object.id) return;
+      updateBoardObjects((prev) => {
+        const exists = prev.find((item) => item.id === object.id);
+        if (exists) {
+          return prev.map((item) => (item.id === object.id ? { ...item, ...object } : item));
+        }
+        return [...prev, JSON.parse(JSON.stringify(object))];
+      });
+    });
+
+    socket.on('boardUpdateObject', ({ objectId, updates }) => {
+      if (!objectId || !updates) return;
+      updateBoardObjects((prev) =>
+        prev.map((item) => (item.id === objectId ? { ...item, ...updates } : item))
+      );
+    });
+
+    socket.on('boardRemoveObject', ({ objectId }) => {
+      if (!objectId) return;
+      updateBoardObjects((prev) => prev.filter((item) => item.id !== objectId));
     });
 
     socket.on('boardClear', () => {
-      setBoardStrokes([]);
+      updateBoardObjects(() => []);
     });
 
-    socket.on('boardSync', (allStrokes) => {
-      if (Array.isArray(allStrokes)) {
-        setBoardStrokes(allStrokes);
+    socket.on('boardSync', (boardState) => {
+      if (boardState && Array.isArray(boardState.objects)) {
+        const snapshot = JSON.parse(JSON.stringify(boardState.objects));
+        updateBoardObjects(() => snapshot);
       }
     });
 
@@ -394,7 +592,17 @@ const Chat = () => {
       stopLocalMedia();
       cleanupConnections();
     };
-  }, [cleanupConnections, handleSignal, chatId, chatInfoError, loadingChat, stopLocalMedia, user?.username]);
+  }, [
+    cleanupConnections,
+    handleSignal,
+    chatId,
+    chatInfoError,
+    loadingChat,
+    stopLocalMedia,
+    updateBoardObjects,
+    maybeNotify,
+    user?.username,
+  ]);
 
   useEffect(() => {
     if (!callActive) return;
@@ -416,6 +624,20 @@ const Chat = () => {
       }
     });
   }, [callActive, createPeerConnection, participants]);
+
+  const lastBoardSyncRef = useRef(0);
+
+  useEffect(() => {
+    if (!socketReady || !boardOpen || !callActive || !chatId) {
+      return;
+    }
+    const now = Date.now();
+    if (now - lastBoardSyncRef.current < 1500) {
+      return;
+    }
+    lastBoardSyncRef.current = now;
+    socketRef.current?.emit('boardRequestSync', { chatId });
+  }, [socketReady, boardOpen, callActive, chatId]);
 
   const handleSendMessage = (message) => {
     if (!socketRef.current) return;
@@ -460,7 +682,7 @@ const Chat = () => {
     cleanupConnections();
     setCallActive(false);
     setBoardOpen(false);
-    setBoardStrokes([]);
+    updateBoardObjects(() => []);
     setMicMuted(false);
     setCameraOff(false);
   };
@@ -473,13 +695,36 @@ const Chat = () => {
     socketRef.current?.emit('closeBoard', { chatId });
   };
 
-  const handleDrawStroke = (stroke) => {
-    setBoardStrokes((prev) => [...prev, stroke]);
-    socketRef.current?.emit('boardDraw', { chatId, stroke });
+  const handleAddBoardObject = (object) => {
+    if (!object || !object.id) return;
+    const payload = JSON.parse(JSON.stringify(object));
+    updateBoardObjects((prev) => {
+      const exists = prev.find((item) => item.id === payload.id);
+      if (exists) {
+        return prev.map((item) => (item.id === payload.id ? { ...exists, ...payload } : item));
+      }
+      return [...prev, payload];
+    });
+    socketRef.current?.emit('boardAddObject', { chatId, object: payload });
+  };
+
+  const handleUpdateBoardObject = (objectId, updates) => {
+    if (!objectId || !updates) return;
+    const sanitized = JSON.parse(JSON.stringify(updates));
+    updateBoardObjects((prev) =>
+      prev.map((item) => (item.id === objectId ? { ...item, ...sanitized } : item))
+    );
+    socketRef.current?.emit('boardUpdateObject', { chatId, objectId, updates: sanitized });
+  };
+
+  const handleRemoveBoardObject = (objectId) => {
+    if (!objectId) return;
+    updateBoardObjects((prev) => prev.filter((item) => item.id !== objectId));
+    socketRef.current?.emit('boardRemoveObject', { chatId, objectId });
   };
 
   const handleClearBoard = () => {
-    setBoardStrokes([]);
+    updateBoardObjects(() => []);
     socketRef.current?.emit('boardClear', { chatId });
   };
 
@@ -516,6 +761,12 @@ const Chat = () => {
     });
   };
 
+  const resolvedCustomTitle = preferences.customTitle?.trim() || null;
+  const displayTitle =
+    resolvedCustomTitle ||
+    chatInfo?.title ||
+    (chatInfo?.partner ? `Чат с ${chatInfo.partner.username}` : 'Личный чат');
+
   if (loadingChat) {
     return <LoadingScreen message="Открываем чат..." />;
   }
@@ -543,12 +794,15 @@ const Chat = () => {
         <header className="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
           <div>
             <h1 className="text-2xl font-semibold">
-              {chatInfo?.partner ? `Чат с ${chatInfo.partner.username}` : 'Личный чат'}
+              {displayTitle}
             </h1>
             <p className="text-sm text-slate-400">
               История сообщений сохранится автоматически. Идентификатор чата: <span className="font-mono">{chatId}</span>
             </p>
             {error && <p className="text-sm text-rose-300 mt-2">{error}</p>}
+            {preferencesError && (
+              <p className="text-sm text-amber-300 mt-2">{preferencesError}</p>
+            )}
           </div>
           <button
             onClick={handleLeave}
@@ -611,10 +865,28 @@ const Chat = () => {
             </div>
             <div className="rounded-3xl border border-white/10 bg-white/5 backdrop-blur-xl p-4">
               <Whiteboard
-                strokes={boardStrokes}
-                onDrawStroke={handleDrawStroke}
+                objects={boardObjects}
+                onAddObject={handleAddBoardObject}
+                onUpdateObject={handleUpdateBoardObject}
+                onRemoveObject={handleRemoveBoardObject}
                 onClear={handleClearBoard}
                 disabled={!boardOpen || !callActive}
+              />
+            </div>
+            <div className="rounded-3xl border border-white/10 bg-white/5 backdrop-blur-xl p-4">
+              <ChatSettings
+                chatId={chatId}
+                partner={chatInfo?.partner || null}
+                preferences={preferences}
+                loading={preferencesLoading}
+                onRename={handleRenameChat}
+                onToggleNotifications={handleNotificationsChange}
+                notificationsSupported={notificationsSupported}
+                notificationPermission={notificationPermission}
+                onRequestPermission={requestNotificationPermission}
+                onGenerateInvite={handleGenerateInvite}
+                generatingInvite={generatingInvite}
+                inviteInfo={inviteInfo}
               />
             </div>
             <div className="rounded-3xl border border-white/10 bg-white/5 backdrop-blur-xl p-4">

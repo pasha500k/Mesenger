@@ -182,7 +182,7 @@ const Dashboard = () => {
                     >
                       <div>
                         <p className="font-medium">
-                          {chat.partner?.username ? `Чат с ${chat.partner.username}` : `Чат ${chat.id}`}
+                          {chat.title || (chat.partner?.username ? `Чат с ${chat.partner.username}` : `Чат ${chat.id}`)}
                         </p>
                         {chat.last_sender ? (
                           <p className="text-xs text-slate-300 mt-1">
