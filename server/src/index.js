@@ -10,7 +10,29 @@ const Database = require('better-sqlite3');
 const { Server } = require('socket.io');
 
 const PORT = process.env.PORT || 4000;
-const CLIENT_ORIGIN = process.env.CLIENT_ORIGIN || 'http://localhost:5173';
+const defaultOrigins = [
+  'http://localhost:5173',
+  'http://localhost:5174',
+  'http://127.0.0.1:5173',
+  'http://127.0.0.1:5174',
+  'http://localhost:4173',
+  'http://127.0.0.1:4173',
+];
+const envOrigins = (process.env.CLIENT_ORIGIN || '')
+  .split(',')
+  .map((value) => value.trim())
+  .filter(Boolean);
+const CLIENT_ORIGINS = [...new Set([...envOrigins, ...defaultOrigins])];
+
+const allowOrigin = (origin) => !origin || CLIENT_ORIGINS.includes(origin);
+
+const validateCorsOrigin = (origin, callback) => {
+  if (allowOrigin(origin)) {
+    callback(null, true);
+  } else {
+    callback(new Error('Not allowed by CORS'));
+  }
+};
 const JWT_SECRET = process.env.JWT_SECRET || 'super_secret_dev_key';
 
 const dbPath = path.join(__dirname, '..', 'data', 'app.db');
@@ -67,7 +89,10 @@ db.exec(`
 `);
 
 const app = express();
-app.use(cors({ origin: CLIENT_ORIGIN, credentials: true }));
+app.use(cors({
+  origin: validateCorsOrigin,
+  credentials: true,
+}));
 app.use(express.json({ limit: '15mb' }));
 app.use(cookieParser());
 app.use('/uploads', express.static(uploadsDir));
@@ -403,7 +428,7 @@ const server = http.createServer(app);
 
 const io = new Server(server, {
   cors: {
-    origin: CLIENT_ORIGIN,
+    origin: validateCorsOrigin,
     credentials: true,
   },
 });
