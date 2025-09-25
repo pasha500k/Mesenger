@@ -434,6 +434,7 @@ const io = new Server(server, {
 });
 
 const chatsState = new Map();
+const MAX_BOARD_STROKES = 1000;
 
 const getUserFromToken = (token) => {
   if (!token) return null;
@@ -482,6 +483,7 @@ io.on('connection', (socket) => {
       participants: new Map(),
       callActive: false,
       boardEnabled: false,
+      strokes: [],
     };
     room.participants.set(socket.id, {
       id: socket.id,
@@ -492,6 +494,9 @@ io.on('connection', (socket) => {
 
     io.to(chatId).emit('participantsUpdate', Array.from(room.participants.values()));
     socket.emit('callStatus', { callActive: room.callActive, boardEnabled: room.boardEnabled });
+    if (room.boardEnabled) {
+      socket.emit('boardSync', room.strokes || []);
+    }
   });
 
   socket.on('leaveChat', ({ chatId }) => {
@@ -595,6 +600,7 @@ io.on('connection', (socket) => {
     if (room) {
       room.callActive = false;
       room.boardEnabled = false;
+      room.strokes = [];
       io.to(chatId).emit('callStatus', { callActive: false, boardEnabled: false });
       io.to(chatId).emit('boardClosed');
     }
@@ -606,6 +612,7 @@ io.on('connection', (socket) => {
     if (room && room.callActive) {
       room.boardEnabled = true;
       io.to(chatId).emit('boardOpened');
+      io.to(chatId).emit('boardSync', room.strokes || []);
     }
   });
 
@@ -614,6 +621,7 @@ io.on('connection', (socket) => {
     const room = chatsState.get(chatId);
     if (room) {
       room.boardEnabled = false;
+      room.strokes = [];
       io.to(chatId).emit('boardClosed');
     }
   });
@@ -622,6 +630,11 @@ io.on('connection', (socket) => {
     if (!chatId || !stroke) return;
     const room = chatsState.get(chatId);
     if (room && room.boardEnabled) {
+      room.strokes = room.strokes || [];
+      room.strokes.push(stroke);
+      if (room.strokes.length > MAX_BOARD_STROKES) {
+        room.strokes.splice(0, room.strokes.length - MAX_BOARD_STROKES);
+      }
       socket.to(chatId).emit('boardDraw', stroke);
     }
   });
@@ -630,6 +643,7 @@ io.on('connection', (socket) => {
     if (!chatId) return;
     const room = chatsState.get(chatId);
     if (room && room.boardEnabled) {
+      room.strokes = [];
       io.to(chatId).emit('boardClear');
     }
   });

@@ -7,8 +7,15 @@ const VideoTile = ({ stream, label, muted = false, showPlaceholder = false }) =>
   const videoRef = useRef(null);
 
   useEffect(() => {
-    if (videoRef.current && stream) {
+    if (!videoRef.current) return;
+    if (stream) {
       videoRef.current.srcObject = stream;
+      const playPromise = videoRef.current.play();
+      if (playPromise && typeof playPromise.catch === 'function') {
+        playPromise.catch(() => {});
+      }
+    } else {
+      videoRef.current.srcObject = null;
     }
   }, [stream]);
 

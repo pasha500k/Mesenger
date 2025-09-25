@@ -71,6 +71,29 @@ const Chat = () => {
   const localStreamRef = useRef(null);
   const selfIdRef = useRef(null);
 
+  const addTracksToPeer = useCallback((peerConnection, stream) => {
+    if (!peerConnection || !stream) return;
+    const senders = peerConnection.getSenders ? peerConnection.getSenders() : [];
+    stream.getTracks().forEach((track) => {
+      const existingSender = senders.find((sender) => sender.track && sender.track.kind === track.kind);
+      if (existingSender) {
+        existingSender.replaceTrack(track);
+      } else {
+        peerConnection.addTrack(track, stream);
+      }
+    });
+  }, []);
+
+  const attachStreamToPeers = useCallback(
+    (stream) => {
+      if (!stream) return;
+      peersRef.current.forEach((peerConnection) => {
+        addTracksToPeer(peerConnection, stream);
+      });
+    },
+    [addTracksToPeer]
+  );
+
   useEffect(() => {
     let active = true;
     setChatInfo(null);
@@ -149,27 +172,48 @@ const Chat = () => {
       localStreamRef.current.getTracks().forEach((track) => track.stop());
       localStreamRef.current = null;
     }
+    peersRef.current.forEach((peerConnection) => {
+      if (!peerConnection.getSenders) return;
+      peerConnection.getSenders().forEach((sender) => {
+        try {
+          if (sender.track) {
+            sender.replaceTrack(null);
+          }
+        } catch (err) {
+          console.error('Failed to clear sender track', err);
+        }
+      });
+    });
     setLocalStream(null);
   }, []);
 
   const createPeerConnection = useCallback(
     (peerId, isInitiator) => {
       const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+      pc.__negotiating = false;
       peersRef.current.set(peerId, pc);
 
       if (localStreamRef.current) {
-        localStreamRef.current.getTracks().forEach((track) => pc.addTrack(track, localStreamRef.current));
+        addTracksToPeer(pc, localStreamRef.current);
       }
 
       pc.ontrack = (event) => {
-        const stream = event.streams[0];
+        const stream = event.streams?.[0] || new MediaStream([event.track]);
         if (stream) {
-          remoteStreamsRef.current.set(peerId, {
-            id: peerId,
-            stream,
-            label:
-              participantsRef.current.find((participant) => participant.id === peerId)?.displayName || 'Участник',
-          });
+          const existing = remoteStreamsRef.current.get(peerId);
+          if (existing && existing.stream) {
+            if (!existing.stream.getTracks().some((track) => track.id === event.track.id)) {
+              existing.stream.addTrack(event.track);
+            }
+            remoteStreamsRef.current.set(peerId, { ...existing });
+          } else {
+            remoteStreamsRef.current.set(peerId, {
+              id: peerId,
+              stream,
+              label:
+                participantsRef.current.find((participant) => participant.id === peerId)?.displayName || 'Участник',
+            });
+          }
           setRemoteStreams(Array.from(remoteStreamsRef.current.values()));
         }
       };
@@ -181,6 +225,23 @@ const Chat = () => {
             target: peerId,
             data: { type: 'candidate', candidate: event.candidate },
           });
+        }
+      };
+
+      pc.onnegotiationneeded = async () => {
+        if (!localStreamRef.current) return;
+        if (!socketRef.current) return;
+        if (pc.signalingState !== 'stable') return;
+        if (pc.__negotiating) return;
+        pc.__negotiating = true;
+        try {
+          const offer = await pc.createOffer();
+          await pc.setLocalDescription(offer);
+          socketRef.current.emit('signal', { chatId, target: peerId, data: offer });
+        } catch (err) {
+          console.error('Negotiation error', err);
+        } finally {
+          pc.__negotiating = false;
         }
       };
 
@@ -207,7 +268,7 @@ const Chat = () => {
 
       return pc;
     },
-    [chatId]
+    [addTracksToPeer, chatId]
   );
 
   const handleSignal = useCallback(
@@ -310,10 +371,20 @@ const Chat = () => {
       setBoardStrokes([]);
     });
 
+    socket.on('boardSync', (allStrokes) => {
+      if (Array.isArray(allStrokes)) {
+        setBoardStrokes(allStrokes);
+      }
+    });
+
     socket.on('signal', handleSignal);
 
     socket.on('fileShare', (file) => {
       setFiles((prev) => [...prev, file]);
+    });
+
+    socket.on('disconnect', () => {
+      setSocketReady(false);
     });
 
     return () => {
@@ -366,9 +437,17 @@ const Chat = () => {
       const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
       localStreamRef.current = stream;
       setLocalStream(stream);
+      attachStreamToPeers(stream);
       socketRef.current?.emit('startCall', { chatId });
       setMicMuted(false);
       setCameraOff(false);
+      participantsRef.current
+        .filter((participant) => participant.id !== selfIdRef.current)
+        .forEach((participant) => {
+          if (!peersRef.current.has(participant.id)) {
+            createPeerConnection(participant.id, true);
+          }
+        });
     } catch (err) {
       console.error(err);
       setError('Не удалось получить доступ к камере или микрофону.');
@@ -379,6 +458,8 @@ const Chat = () => {
     socketRef.current?.emit('endCall', { chatId });
     stopLocalMedia();
     cleanupConnections();
+    setCallActive(false);
+    setBoardOpen(false);
     setBoardStrokes([]);
     setMicMuted(false);
     setCameraOff(false);
