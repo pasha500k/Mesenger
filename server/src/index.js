@@ -23,9 +23,25 @@ const envOrigins = (process.env.CLIENT_ORIGIN || '')
   .split(',')
   .map((value) => value.trim())
   .filter(Boolean);
-const CLIENT_ORIGINS = [...new Set([...envOrigins, ...defaultOrigins])];
+const clientOriginsSet = new Set([...envOrigins, ...defaultOrigins]);
 
-const allowOrigin = (origin) => !origin || CLIENT_ORIGINS.includes(origin);
+const isLocalDevelopmentOrigin = (origin) => {
+  try {
+    const url = new URL(origin);
+    const isHttp = url.protocol === 'http:' || url.protocol === 'https:';
+    const isLocalhost = url.hostname === 'localhost' || url.hostname === '127.0.0.1';
+    return isHttp && isLocalhost;
+  } catch (error) {
+    return false;
+  }
+};
+
+const allowOrigin = (origin) => {
+  if (!origin) return true;
+  if (clientOriginsSet.has(origin)) return true;
+  if (isLocalDevelopmentOrigin(origin)) return true;
+  return false;
+};
 
 const validateCorsOrigin = (origin, callback) => {
   if (allowOrigin(origin)) {
