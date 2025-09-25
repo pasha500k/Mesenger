@@ -3,23 +3,26 @@ import PropTypes from 'prop-types';
 
 const Whiteboard = ({ strokes, onDrawStroke, onClear, disabled }) => {
   const canvasRef = useRef(null);
+  const boardWrapperRef = useRef(null);
   const [isDrawing, setIsDrawing] = useState(false);
   const [currentStroke, setCurrentStroke] = useState(null);
   const [color, setColor] = useState('#60a5fa');
   const [size, setSize] = useState(3);
+  const [scale, setScale] = useState(1);
+  const [isFullscreen, setIsFullscreen] = useState(false);
 
   const resizeCanvas = () => {
     const canvas = canvasRef.current;
-    if (!canvas) return;
-    const parent = canvas.parentElement;
-    if (!parent) return;
-    const { width, height } = parent.getBoundingClientRect();
+    const wrapper = boardWrapperRef.current;
+    if (!canvas || !wrapper) return;
+    const { width, height } = wrapper.getBoundingClientRect();
     const ratio = window.devicePixelRatio || 1;
     canvas.width = width * ratio;
     canvas.height = height * ratio;
     canvas.style.width = `${width}px`;
     canvas.style.height = `${height}px`;
     const context = canvas.getContext('2d');
+    context.setTransform(1, 0, 0, 1, 0, 0);
     context.scale(ratio, ratio);
     renderStrokes();
   };
@@ -28,6 +31,17 @@ const Whiteboard = ({ strokes, onDrawStroke, onClear, disabled }) => {
     resizeCanvas();
     window.addEventListener('resize', resizeCanvas);
     return () => window.removeEventListener('resize', resizeCanvas);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    const handleFullscreenChange = () => {
+      setIsFullscreen(document.fullscreenElement === boardWrapperRef.current);
+      resizeCanvas();
+    };
+
+    document.addEventListener('fullscreenchange', handleFullscreenChange);
+    return () => document.removeEventListener('fullscreenchange', handleFullscreenChange);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -68,8 +82,8 @@ const Whiteboard = ({ strokes, onDrawStroke, onClear, disabled }) => {
     const canvas = canvasRef.current;
     if (!canvas) return { x: 0, y: 0 };
     const rect = canvas.getBoundingClientRect();
-    const x = event.clientX - rect.left;
-    const y = event.clientY - rect.top;
+    const x = (event.clientX - rect.left) / scale;
+    const y = (event.clientY - rect.top) / scale;
     return { x, y };
   };
 
@@ -116,11 +130,35 @@ const Whiteboard = ({ strokes, onDrawStroke, onClear, disabled }) => {
     onClear();
   };
 
+  const handleZoom = (delta) => {
+    setScale((prev) => {
+      const next = Math.min(3, Math.max(0.5, parseFloat((prev + delta).toFixed(2))));
+      return next;
+    });
+  };
+
+  const handleResetZoom = () => {
+    setScale(1);
+  };
+
+  const handleToggleFullscreen = async () => {
+    if (!boardWrapperRef.current || disabled) return;
+    try {
+      if (document.fullscreenElement === boardWrapperRef.current) {
+        await document.exitFullscreen();
+      } else {
+        await boardWrapperRef.current.requestFullscreen();
+      }
+    } catch (error) {
+      console.error('Не удалось переключить полноэкранный режим доски', error);
+    }
+  };
+
   return (
     <div className="space-y-3">
-      <div className="flex items-center justify-between">
+      <div className="flex flex-wrap items-center justify-between gap-3">
         <h3 className="text-sm font-semibold text-white">Векторная доска</h3>
-        <div className="flex items-center gap-3 text-xs text-slate-200">
+        <div className="flex flex-wrap items-center gap-3 text-xs text-slate-200 justify-end">
           <label className="flex items-center gap-2">
             Цвет
             <input
@@ -150,18 +188,72 @@ const Whiteboard = ({ strokes, onDrawStroke, onClear, disabled }) => {
           >
             Очистить
           </button>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => handleZoom(-0.25)}
+              disabled={disabled || scale <= 0.5}
+              className="h-8 w-8 rounded-full bg-white/10 hover:bg-white/20 transition disabled:opacity-60"
+              title="Уменьшить масштаб"
+            >
+              −
+            </button>
+            <span className="text-[11px] text-slate-300 w-14 text-center">
+              {(scale * 100).toFixed(0)}%
+            </span>
+            <button
+              type="button"
+              onClick={() => handleZoom(0.25)}
+              disabled={disabled || scale >= 3}
+              className="h-8 w-8 rounded-full bg-white/10 hover:bg-white/20 transition disabled:opacity-60"
+              title="Увеличить масштаб"
+            >
+              +
+            </button>
+            <button
+              type="button"
+              onClick={handleResetZoom}
+              disabled={disabled || scale === 1}
+              className="px-3 py-1.5 rounded-full bg-white/10 hover:bg-white/20 transition disabled:opacity-60"
+            >
+              100%
+            </button>
+          </div>
+          <button
+            type="button"
+            onClick={handleToggleFullscreen}
+            disabled={disabled}
+            className="px-3 py-1.5 rounded-full bg-white/10 hover:bg-white/20 transition disabled:opacity-60"
+          >
+            {isFullscreen ? 'Свернуть' : 'На весь экран'}
+          </button>
         </div>
       </div>
-      <div className={`relative rounded-3xl border ${disabled ? 'border-dashed border-white/20' : 'border-white/10'} bg-white/5 overflow-hidden`} style={{ minHeight: 320 }}>
-        <canvas
-          ref={canvasRef}
-          onPointerDown={handlePointerDown}
-          onPointerMove={handlePointerMove}
-          onPointerUp={handlePointerUp}
-          onPointerCancel={handlePointerUp}
-          onPointerLeave={handlePointerUp}
-          className="w-full h-full cursor-crosshair"
-        />
+      <div
+        ref={boardWrapperRef}
+        className={`relative rounded-3xl border ${disabled ? 'border-dashed border-white/20' : 'border-white/10'} bg-white/5`}
+        style={{ minHeight: 320 }}
+      >
+        <div className="relative h-full w-full overflow-auto">
+          <div
+            style={{
+              width: '100%',
+              height: '100%',
+              transform: `scale(${scale})`,
+              transformOrigin: 'top left',
+            }}
+          >
+            <canvas
+              ref={canvasRef}
+              onPointerDown={handlePointerDown}
+              onPointerMove={handlePointerMove}
+              onPointerUp={handlePointerUp}
+              onPointerCancel={handlePointerUp}
+              onPointerLeave={handlePointerUp}
+              className="w-full h-full cursor-crosshair"
+            />
+          </div>
+        </div>
         {disabled && (
           <div className="absolute inset-0 flex items-center justify-center text-sm text-slate-400 backdrop-blur-sm">
             Доска доступна только во время активного звонка по запросу.
