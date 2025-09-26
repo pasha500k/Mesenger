@@ -209,12 +209,29 @@ const Whiteboard = ({ objects, onAddObject, onUpdateObject, onRemoveObject, onCl
       event.preventDefault();
     };
 
+    const preventContextMenu = (event) => {
+      if (disabled) return;
+      event.preventDefault();
+    };
+
     canvas?.addEventListener('wheel', suppressScroll, { passive: false });
     wrapper?.addEventListener('wheel', suppressScroll, { passive: false });
+    canvas?.addEventListener('contextmenu', preventContextMenu);
+    wrapper?.addEventListener('contextmenu', preventContextMenu);
     return () => {
       canvas?.removeEventListener('wheel', suppressScroll);
       wrapper?.removeEventListener('wheel', suppressScroll);
+      canvas?.removeEventListener('contextmenu', preventContextMenu);
+      wrapper?.removeEventListener('contextmenu', preventContextMenu);
     };
+  }, [disabled]);
+
+  useEffect(() => {
+    if (!disabled) return;
+    const resetOffset = { x: 0, y: 0 };
+    viewRef.current = { scale: 1, offset: resetOffset };
+    setScale(1);
+    setOffset(resetOffset);
   }, [disabled]);
 
   useEffect(() => {
@@ -451,20 +468,26 @@ const Whiteboard = ({ objects, onAddObject, onUpdateObject, onRemoveObject, onCl
 
   const handlePointerDown = useCallback(
     (event) => {
-      if (disabled || event.button === 2) return;
+      if (disabled) return;
+      const isRightClick = event.button === 2;
+      const isMiddleClick = event.button === 1;
       event.preventDefault();
       const canvas = canvasRef.current;
       if (!canvas) return;
       canvas.setPointerCapture?.(event.pointerId);
       const point = getBoardPoint(event);
 
-      if (tool === 'pan' || event.button === 1) {
+      if (tool === 'pan' || isMiddleClick || isRightClick) {
         const { offset: currentOffset } = viewRef.current;
         panRef.current = {
           start: { x: event.clientX, y: event.clientY },
           initial: { ...currentOffset },
         };
         setIsPanningActive(true);
+        return;
+      }
+
+      if (isRightClick) {
         return;
       }
 
