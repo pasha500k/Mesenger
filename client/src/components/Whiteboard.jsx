@@ -175,6 +175,7 @@ const drawFile = (context, object) => {
 const Whiteboard = ({ objects, onAddObject, onUpdateObject, onRemoveObject, onClear, disabled }) => {
   const canvasRef = useRef(null);
   const boardWrapperRef = useRef(null);
+  const boardContainerRef = useRef(null);
   const imageCacheRef = useRef(new Map());
   const selectionRef = useRef(null);
   const panRef = useRef(null);
@@ -200,16 +201,19 @@ const Whiteboard = ({ objects, onAddObject, onUpdateObject, onRemoveObject, onCl
 
   useEffect(() => {
     const canvas = canvasRef.current;
-    if (!canvas) return () => {};
+    const wrapper = boardWrapperRef.current;
+    if (!canvas && !wrapper) return () => {};
 
     const suppressScroll = (event) => {
       if (disabled) return;
       event.preventDefault();
     };
 
-    canvas.addEventListener('wheel', suppressScroll, { passive: false });
+    canvas?.addEventListener('wheel', suppressScroll, { passive: false });
+    wrapper?.addEventListener('wheel', suppressScroll, { passive: false });
     return () => {
-      canvas.removeEventListener('wheel', suppressScroll);
+      canvas?.removeEventListener('wheel', suppressScroll);
+      wrapper?.removeEventListener('wheel', suppressScroll);
     };
   }, [disabled]);
 
@@ -369,7 +373,7 @@ const Whiteboard = ({ objects, onAddObject, onUpdateObject, onRemoveObject, onCl
 
   useEffect(() => {
     const handleFullscreenChange = () => {
-      setIsFullscreen(document.fullscreenElement === boardWrapperRef.current);
+      setIsFullscreen(document.fullscreenElement === boardContainerRef.current);
       resizeCanvas();
     };
 
@@ -733,12 +737,12 @@ const Whiteboard = ({ objects, onAddObject, onUpdateObject, onRemoveObject, onCl
   };
 
   const handleToggleFullscreen = async () => {
-    if (!boardWrapperRef.current || disabled) return;
+    if (!boardContainerRef.current || disabled) return;
     try {
-      if (document.fullscreenElement === boardWrapperRef.current) {
+      if (document.fullscreenElement === boardContainerRef.current) {
         await document.exitFullscreen();
       } else {
-        await boardWrapperRef.current.requestFullscreen();
+        await boardContainerRef.current.requestFullscreen();
       }
     } catch (error) {
       console.error('Не удалось переключить полноэкранный режим доски', error);
@@ -839,8 +843,13 @@ const Whiteboard = ({ objects, onAddObject, onUpdateObject, onRemoveObject, onCl
     }
   }, [isPanningActive, tool]);
 
+  const containerClasses = `space-y-3 flex flex-col ${isFullscreen ? 'h-full bg-slate-900/95 p-4' : ''}`;
+  const boardWrapperClasses = `relative rounded-3xl border ${
+    disabled ? 'border-dashed border-white/20' : 'border-white/10'
+  } bg-white/5 overflow-hidden ${isFullscreen ? 'flex-1' : ''}`;
+
   return (
-    <div className="space-y-3">
+    <div ref={boardContainerRef} className={containerClasses}>
       <div className="flex flex-wrap items-center justify-between gap-3">
         <h3 className="text-sm font-semibold text-white">Векторная доска</h3>
         <div className="flex flex-wrap items-center gap-3 text-xs text-slate-200 justify-end">
@@ -947,7 +956,7 @@ const Whiteboard = ({ objects, onAddObject, onUpdateObject, onRemoveObject, onCl
       </div>
       <div
         ref={boardWrapperRef}
-        className={`relative rounded-3xl border ${disabled ? 'border-dashed border-white/20' : 'border-white/10'} bg-white/5`}
+        className={boardWrapperClasses}
         style={{ minHeight: 360 }}
       >
         <canvas
