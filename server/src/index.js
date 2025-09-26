@@ -50,6 +50,9 @@ const validateCorsOrigin = (origin, callback) => {
     callback(new Error('Not allowed by CORS'));
   }
 };
+
+const ADMIN_USERNAME = 'admin';
+const ADMIN_PASSWORD = 'Hehetoto123';
 const JWT_SECRET = process.env.JWT_SECRET || 'super_secret_dev_key';
 
 const dbPath = path.join(__dirname, '..', 'data', 'app.db');
@@ -152,6 +155,15 @@ const ensureAuth = (req, res, next) => {
   }
 };
 
+const isAdminUser = (user) => user && user.username === ADMIN_USERNAME;
+
+const ensureAdmin = (req, res, next) => {
+  if (!isAdminUser(req.user)) {
+    return res.status(403).json({ message: 'Требуются права администратора' });
+  }
+  return next();
+};
+
 const createUserStmt = db.prepare('INSERT INTO users (username, password_hash) VALUES (?, ?)');
 const findUserStmt = db.prepare('SELECT id, username, password_hash FROM users WHERE username = ?');
 const getUserByIdStmt = db.prepare('SELECT id, username FROM users WHERE id = ?');
@@ -167,6 +179,9 @@ const getMessageByIdStmt = db.prepare(
 );
 const listRoomMessagesStmt = db.prepare(
   'SELECT id, room_id, sender_name, type, content, attachment_path, metadata, created_at FROM messages WHERE room_id = ? ORDER BY created_at ASC LIMIT 200'
+);
+const getLastMessageForChatStmt = db.prepare(
+  'SELECT sender_name, type, content, attachment_path, metadata, created_at FROM messages WHERE room_id = ? ORDER BY created_at DESC, id DESC LIMIT 1'
 );
 const ensureChatAccessStmt = db.prepare(
   'SELECT id, user_one, user_two FROM direct_chats WHERE id = ? AND (user_one = ? OR user_two = ?)'
@@ -258,6 +273,42 @@ const markInviteRedeemedStmt = db.prepare(
   'UPDATE chat_invites SET revoked = 1, redeemed_by = ?, redeemed_at = ? WHERE id = ?'
 );
 
+const countUsersStmt = db.prepare('SELECT COUNT(*) AS count FROM users');
+const countChatsStmt = db.prepare('SELECT COUNT(*) AS count FROM direct_chats');
+const listRecentUsersStmt = db.prepare(
+  'SELECT id, username, created_at FROM users ORDER BY datetime(created_at) DESC LIMIT 25'
+);
+const listRecentChatsStmt = db.prepare(`
+  SELECT
+    dc.id,
+    dc.created_at,
+    u1.username AS user_one_username,
+    u2.username AS user_two_username,
+    (
+      SELECT created_at FROM messages WHERE room_id = dc.id ORDER BY created_at DESC, id DESC LIMIT 1
+    ) AS last_activity
+  FROM direct_chats dc
+  JOIN users u1 ON u1.id = dc.user_one
+  JOIN users u2 ON u2.id = dc.user_two
+  ORDER BY (last_activity IS NULL), last_activity DESC, datetime(dc.created_at) DESC
+  LIMIT 25
+`);
+
+const ensureAdminUser = () => {
+  const existing = findUserStmt.get(ADMIN_USERNAME);
+  if (!existing) {
+    const hash = bcrypt.hashSync(ADMIN_PASSWORD, 10);
+    try {
+      createUserStmt.run(ADMIN_USERNAME, hash);
+      console.log('Admin user created with default credentials');
+    } catch (err) {
+      console.error('Failed to create default admin user', err);
+    }
+  }
+};
+
+ensureAdminUser();
+
 const formatMessage = (row) => {
   if (!row) return null;
   let metadata = null;
@@ -314,6 +365,16 @@ const formatChatSummary = (row) => {
     last_metadata: metadata,
     last_timestamp: row.last_timestamp ? Number(row.last_timestamp) : null,
   };
+};
+
+const parseTimestamp = (value) => {
+  if (value == null) return null;
+  const numeric = Number(value);
+  if (!Number.isNaN(numeric) && numeric !== 0) {
+    return numeric;
+  }
+  const parsed = Date.parse(value);
+  return Number.isNaN(parsed) ? null : parsed;
 };
 
 const getChatIdForUsers = (firstId, secondId) => {
@@ -470,6 +531,46 @@ app.get('/api/chats/:chatId', ensureAuth, (req, res) => {
     return res.status(400).json({ message: 'Chat id is required' });
   }
   try {
+    if (isAdminUser(req.user)) {
+      const chatRow = getChatRowStmt.get(chatId);
+      if (!chatRow) {
+        return res.status(404).json({ message: 'Чат не найден' });
+      }
+      const userOne = getUserByIdStmt.get(chatRow.user_one);
+      const userTwo = getUserByIdStmt.get(chatRow.user_two);
+      const lastMessage = getLastMessageForChatStmt.get(chatId);
+      let metadata = null;
+      if (lastMessage?.metadata) {
+        try {
+          metadata = JSON.parse(lastMessage.metadata);
+        } catch (err) {
+          metadata = null;
+        }
+      }
+      res.json({
+        chat: {
+          id: chatId,
+          created_at: chatRow.created_at ? Number(chatRow.created_at) : null,
+          title: userOne && userTwo ? `Мониторинг: ${userOne.username} ↔ ${userTwo.username}` : 'Мониторинг чата',
+          custom_title: null,
+          notifications_enabled: false,
+          observers: [],
+          last_message:
+            lastMessage?.type === 'audio'
+              ? '[Голосовое сообщение]'
+              : lastMessage?.content || null,
+          last_sender: lastMessage?.sender_name || null,
+          last_type: lastMessage?.type || null,
+          last_attachment: lastMessage?.attachment_path || null,
+          last_metadata: metadata,
+          last_timestamp: lastMessage?.created_at ? Number(lastMessage.created_at) : null,
+          participants: [userOne, userTwo]
+            .filter(Boolean)
+            .map((user) => ({ id: user.id, username: user.username })),
+        },
+      });
+      return;
+    }
     const detail = getChatSummaryStmt.get(
       req.user.id,
       req.user.id,
@@ -495,9 +596,16 @@ app.get('/api/chats/:chatId/messages', ensureAuth, (req, res) => {
     return res.status(400).json({ message: 'Chat id is required' });
   }
   try {
-    const detail = ensureChatAccessStmt.get(chatId, req.user.id, req.user.id);
-    if (!detail) {
-      return res.status(404).json({ message: 'Чат не найден' });
+    if (!isAdminUser(req.user)) {
+      const detail = ensureChatAccessStmt.get(chatId, req.user.id, req.user.id);
+      if (!detail) {
+        return res.status(404).json({ message: 'Чат не найден' });
+      }
+    } else {
+      const chatRow = getChatRowStmt.get(chatId);
+      if (!chatRow) {
+        return res.status(404).json({ message: 'Чат не найден' });
+      }
     }
     const messages = listRoomMessagesStmt
       .all(chatId)
@@ -518,6 +626,15 @@ app.get('/api/chats/:chatId/preferences', ensureAuth, (req, res) => {
     return res.status(400).json({ message: 'Chat id is required' });
   }
   try {
+    if (isAdminUser(req.user)) {
+      return res.json({
+        preferences: {
+          customTitle: null,
+          notificationsEnabled: false,
+          readOnly: true,
+        },
+      });
+    }
     const detail = ensureChatAccessStmt.get(chatId, req.user.id, req.user.id);
     if (!detail) {
       return res.status(404).json({ message: 'Чат не найден' });
@@ -542,6 +659,9 @@ app.patch('/api/chats/:chatId/preferences', ensureAuth, (req, res) => {
     return res.status(400).json({ message: 'Chat id is required' });
   }
   try {
+    if (isAdminUser(req.user)) {
+      return res.status(403).json({ message: 'Администратор не может менять настройки чужих чатов' });
+    }
     const detail = ensureChatAccessStmt.get(chatId, req.user.id, req.user.id);
     if (!detail) {
       return res.status(404).json({ message: 'Чат не найден' });
@@ -587,6 +707,57 @@ app.post('/api/chats/:chatId/invitations', ensureAuth, (req, res) => {
     });
   } catch (err) {
     console.error('Create chat invite error', err);
+    res.status(500).json({ message: 'Internal server error' });
+  }
+});
+
+app.get('/api/admin/dashboard', ensureAuth, ensureAdmin, (req, res) => {
+  try {
+    const totalUsers = Number(countUsersStmt.get().count || 0);
+    const totalChats = Number(countChatsStmt.get().count || 0);
+    const recentUsers = listRecentUsersStmt.all().map((row) => ({
+      id: row.id,
+      username: row.username,
+      created_at: parseTimestamp(row.created_at),
+    }));
+    const recentChats = listRecentChatsStmt.all().map((row) => ({
+      id: row.id,
+      users: [row.user_one_username, row.user_two_username],
+      created_at: parseTimestamp(row.created_at),
+      last_activity: parseTimestamp(row.last_activity),
+      isLive: chatsState.has(row.id) && Boolean(chatsState.get(row.id)?.callActive),
+    }));
+    const activeCalls = Array.from(chatsState.entries())
+      .filter(([, room]) => room.callActive)
+      .map(([chatId, room]) => {
+        const participants = Array.from(room.participants.values()).map((participant) => ({
+          id: participant.id,
+          username: participant.username,
+          displayName: participant.displayName,
+          hidden: Boolean(participant.hidden),
+          role: participant.hidden ? 'observer' : 'participant',
+        }));
+        const observers = participants.filter((participant) => participant.hidden).length;
+        return {
+          chatId,
+          boardEnabled: Boolean(room.boardEnabled),
+          observers,
+          participants,
+        };
+      });
+    res.json({
+      overview: {
+        totalUsers,
+        totalChats,
+        activeCalls: activeCalls.length,
+        boardsOpen: activeCalls.filter((call) => call.boardEnabled).length,
+      },
+      recentUsers,
+      recentChats,
+      activeCalls,
+    });
+  } catch (err) {
+    console.error('Admin dashboard error', err);
     res.status(500).json({ message: 'Internal server error' });
   }
 });
@@ -736,9 +907,12 @@ io.use((socket, next) => {
 });
 
 io.on('connection', (socket) => {
-  socket.on('joinChat', ({ chatId, displayName }) => {
+  socket.on('joinChat', ({ chatId, displayName, stealth }) => {
     if (!chatId) return;
-    const chat = ensureChatAccessStmt.get(chatId, socket.user.id, socket.user.id);
+    const isAdmin = isAdminUser(socket.user);
+    const chat = isAdmin
+      ? getChatRowStmt.get(chatId)
+      : ensureChatAccessStmt.get(chatId, socket.user.id, socket.user.id);
     if (!chat) {
       return;
     }
@@ -750,10 +924,13 @@ io.on('connection', (socket) => {
       boardEnabled: false,
       boardState: createEmptyBoardState(),
     };
+    const hidden = Boolean(stealth && isAdmin);
     room.participants.set(socket.id, {
       id: socket.id,
       username: socket.user.username,
       displayName: displayName || socket.user.username,
+      hidden,
+      role: hidden ? 'observer' : 'participant',
     });
     chatsState.set(chatId, room);
 
@@ -853,7 +1030,8 @@ io.on('connection', (socket) => {
   socket.on('startCall', ({ chatId }) => {
     if (!chatId) return;
     const room = chatsState.get(chatId);
-    if (room) {
+    const participant = room?.participants.get(socket.id);
+    if (room && participant && !participant.hidden) {
       room.callActive = true;
       io.to(chatId).emit('callStatus', { callActive: true, boardEnabled: room.boardEnabled });
     }
@@ -862,7 +1040,8 @@ io.on('connection', (socket) => {
   socket.on('endCall', ({ chatId }) => {
     if (!chatId) return;
     const room = chatsState.get(chatId);
-    if (room) {
+    const participant = room?.participants.get(socket.id);
+    if (room && participant && !participant.hidden) {
       room.callActive = false;
       room.boardEnabled = false;
       room.boardState = createEmptyBoardState();
@@ -874,7 +1053,8 @@ io.on('connection', (socket) => {
   socket.on('requestBoard', ({ chatId }) => {
     if (!chatId) return;
     const room = chatsState.get(chatId);
-    if (room && room.callActive) {
+    const participant = room?.participants.get(socket.id);
+    if (room && room.callActive && participant && !participant.hidden) {
       room.boardEnabled = true;
       room.boardState = room.boardState || createEmptyBoardState();
       io.to(chatId).emit('boardOpened');
@@ -886,7 +1066,8 @@ io.on('connection', (socket) => {
   socket.on('closeBoard', ({ chatId }) => {
     if (!chatId) return;
     const room = chatsState.get(chatId);
-    if (room) {
+    const participant = room?.participants.get(socket.id);
+    if (room && participant && !participant.hidden) {
       room.boardEnabled = false;
       room.boardState = createEmptyBoardState();
       io.to(chatId).emit('boardClosed');
@@ -896,7 +1077,8 @@ io.on('connection', (socket) => {
   socket.on('boardAddObject', ({ chatId, object }) => {
     if (!chatId || !object) return;
     const room = chatsState.get(chatId);
-    if (room && room.boardEnabled) {
+    const participant = room?.participants.get(socket.id);
+    if (room && room.boardEnabled && participant && !participant.hidden) {
       room.boardState = room.boardState || createEmptyBoardState();
       const snapshot = JSON.parse(JSON.stringify(object));
       room.boardState.objects.push(snapshot);
@@ -910,7 +1092,8 @@ io.on('connection', (socket) => {
   socket.on('boardUpdateObject', ({ chatId, objectId, updates }) => {
     if (!chatId || !objectId || !updates) return;
     const room = chatsState.get(chatId);
-    if (room && room.boardEnabled && room.boardState?.objects) {
+    const participant = room?.participants.get(socket.id);
+    if (room && room.boardEnabled && room.boardState?.objects && participant && !participant.hidden) {
       const target = room.boardState.objects.find((item) => item.id === objectId);
       if (target) {
         Object.assign(target, updates);
@@ -922,7 +1105,8 @@ io.on('connection', (socket) => {
   socket.on('boardRemoveObject', ({ chatId, objectId }) => {
     if (!chatId || !objectId) return;
     const room = chatsState.get(chatId);
-    if (room && room.boardEnabled && room.boardState?.objects) {
+    const participant = room?.participants.get(socket.id);
+    if (room && room.boardEnabled && room.boardState?.objects && participant && !participant.hidden) {
       const index = room.boardState.objects.findIndex((item) => item.id === objectId);
       if (index !== -1) {
         room.boardState.objects.splice(index, 1);
@@ -934,7 +1118,8 @@ io.on('connection', (socket) => {
   socket.on('boardClear', ({ chatId }) => {
     if (!chatId) return;
     const room = chatsState.get(chatId);
-    if (room && room.boardEnabled) {
+    const participant = room?.participants.get(socket.id);
+    if (room && room.boardEnabled && participant && !participant.hidden) {
       room.boardState = createEmptyBoardState();
       io.to(chatId).emit('boardClear');
     }

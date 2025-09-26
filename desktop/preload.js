@@ -1,5 +1,5 @@
 const { contextBridge } = require('electron');
 
-contextBridge.exposeInMainWorld('novacollab', {
+contextBridge.exposeInMainWorld('lynxoria', {
   version: process.versions.electron,
 });

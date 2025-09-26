@@ -12,9 +12,16 @@ const ControlsBar = ({
   micMuted,
   cameraOff,
   disabled,
+  stealthMode,
 }) => (
   <div className="flex flex-wrap gap-3 items-center justify-center py-4">
-    {!callActive ? (
+    {stealthMode ? (
+      <div className="px-5 py-3 rounded-2xl bg-white/5 border border-white/10 text-sm text-slate-200 text-center max-w-xl">
+        {callActive
+          ? 'Вы подключены как скрытый наблюдатель. Участники не видят вас, управление звонком отключено.'
+          : 'Вы готовы подключиться скрытно. Дождитесь, пока участники начнут звонок, чтобы слушать его.'}
+      </div>
+    ) : !callActive ? (
       <button
         onClick={onStartCall}
         disabled={disabled}
@@ -80,8 +87,10 @@ ControlsBar.propTypes = {
   micMuted: PropTypes.bool.isRequired,
   cameraOff: PropTypes.bool.isRequired,
   disabled: PropTypes.bool,
+  stealthMode: PropTypes.bool,
 };
 
 ControlsBar.defaultProps = {
   disabled: false,
+  stealthMode: false,
 };

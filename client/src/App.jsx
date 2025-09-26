@@ -6,6 +6,7 @@ import LandingPage from './pages/LandingPage';
 import Dashboard from './pages/Dashboard';
 import Chat from './pages/Chat';
 import AuthPage from './pages/AuthPage';
+import AdminDashboard from './pages/AdminDashboard';
 import LoadingScreen from './components/LoadingScreen';
 import './App.css';
 
@@ -25,6 +26,26 @@ const RequireAuth = ({ children }) => {
 };
 
 RequireAuth.propTypes = {
+  children: PropTypes.node.isRequired,
+};
+
+const RequireAdmin = ({ children }) => {
+  const status = useAuthStore((state) => state.status);
+  const user = useAuthStore((state) => state.user);
+  const location = useLocation();
+
+  if (status !== 'authenticated') {
+    return <LoadingScreen message="Проверяем права доступа..." />;
+  }
+
+  if (!user || user.username !== 'admin') {
+    return <Navigate to="/dashboard" state={{ from: location }} replace />;
+  }
+
+  return children;
+};
+
+RequireAdmin.propTypes = {
   children: PropTypes.node.isRequired,
 };
 
@@ -57,6 +78,16 @@ const App = () => {
         element={
           <RequireAuth>
             <Chat />
+          </RequireAuth>
+        }
+      />
+      <Route
+        path="/admin"
+        element={
+          <RequireAuth>
+            <RequireAdmin>
+              <AdminDashboard />
+            </RequireAdmin>
           </RequireAuth>
         }
       />

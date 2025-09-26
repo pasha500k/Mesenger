@@ -3,6 +3,7 @@ import { useAuthStore } from '../store/useAuthStore';
 
 const LandingPage = () => {
   const status = useAuthStore((state) => state.status);
+  const user = useAuthStore((state) => state.user);
 
   return (
     <div className="min-h-screen bg-slate-950 text-white">
@@ -10,7 +11,7 @@ const LandingPage = () => {
         <div className="absolute inset-0 bg-gradient-to-br from-indigo-500/20 via-purple-500/20 to-transparent" />
         <div className="max-w-6xl mx-auto px-6 py-8 flex items-center justify-between">
           <Link to="/" className="text-2xl font-bold tracking-tight">
-            NovaCollab
+            Lynxoria
           </Link>
           <nav className="flex items-center gap-4">
             <a href="#features" className="text-sm text-slate-200 hover:text-white transition">
@@ -19,6 +20,14 @@ const LandingPage = () => {
             <a href="#security" className="text-sm text-slate-200 hover:text-white transition">
               Безопасность
             </a>
+            {user?.username === 'admin' && (
+              <Link
+                to="/admin"
+                className="px-4 py-2 rounded-full border border-white/20 hover:border-white/60 transition text-sm"
+              >
+                Админ-панель
+              </Link>
+            )}
             <Link
               to={status === 'authenticated' ? '/dashboard' : '/auth'}
               className="px-4 py-2 rounded-full bg-indigo-500 hover:bg-indigo-400 transition text-sm font-semibold"
@@ -30,14 +39,14 @@ const LandingPage = () => {
         <div className="max-w-6xl mx-auto px-6 py-16 grid md:grid-cols-2 gap-10 items-center relative">
           <div>
             <p className="uppercase tracking-[0.3em] text-indigo-300 text-xs font-semibold mb-4">
-              Единственное пространство для совместной работы
+              Lynxoria — приватная коммуникация для команд и сообществ
             </p>
             <h1 className="text-4xl md:text-6xl font-bold leading-tight mb-6">
-              Встречи, доска и чат в одном приложении без лишних усилий
+              Чаты, звонки и совместная доска в одном элегантном пространстве
             </h1>
             <p className="text-lg text-slate-300 mb-8 leading-relaxed">
-              Запускайте приватные чаты между пользователями, подключайтесь к защищенным видеозвонкам, делитесь идеями на
-              векторной доске и отправляйте файлы команде. Всё работает прямо из браузера.
+              Общайтесь так же удобно, как в мессенджере, и подключайтесь к звонкам, когда это действительно нужно. Lynxoria
+              хранит историю сообщений, поддерживает доску во время встреч и мгновенно синхронизирует файлы между устройствами.
             </p>
             <div className="flex flex-wrap gap-4">
               <Link
@@ -74,7 +83,7 @@ const LandingPage = () => {
       </header>
 
       <section id="features" className="max-w-6xl mx-auto px-6 py-20">
-        <h2 className="text-3xl font-bold mb-8">Почему NovaCollab?</h2>
+        <h2 className="text-3xl font-bold mb-8">Почему Lynxoria?</h2>
         <div className="grid md:grid-cols-3 gap-8 text-slate-300">
           <div className="p-6 rounded-2xl bg-white/5 border border-white/10">
             <h3 className="text-xl font-semibold mb-3 text-white">Совместная работа</h3>
@@ -98,7 +107,7 @@ const LandingPage = () => {
       </section>
 
       <footer className="border-t border-white/10 py-6 text-center text-sm text-slate-400">
-        © {new Date().getFullYear()} NovaCollab. Построено для гибридных команд.
+        © {new Date().getFullYear()} Lynxoria. Подходит для команд, школ и сообществ.
       </footer>
     </div>
   );

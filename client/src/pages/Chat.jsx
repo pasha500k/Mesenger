@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { useNavigate, useParams } from 'react-router-dom';
+import { useLocation, useNavigate, useParams } from 'react-router-dom';
 import { io } from 'socket.io-client';
 import { SOCKET_URL, API_BASE_URL } from '../config';
 import { useAuthStore } from '../store/useAuthStore';
@@ -45,7 +45,17 @@ const normalizeMessage = (payload, apiBaseUrl) => {
 const Chat = () => {
   const { chatId } = useParams();
   const navigate = useNavigate();
+  const location = useLocation();
   const user = useAuthStore((state) => state.user);
+
+  const isAdminUser = user?.username === 'admin';
+  const searchParams = new URLSearchParams(location.search);
+  const stealthRequested =
+    location.state?.stealthObserver ||
+    searchParams.get('stealth') === '1' ||
+    searchParams.get('stealth') === 'true';
+  const stealthMode = Boolean(isAdminUser && stealthRequested);
+  const exitRoute = location.state?.fromAdmin ? '/admin' : '/dashboard';
 
   const [participants, setParticipants] = useState([]);
   const [messages, setMessages] = useState([]);
@@ -160,6 +170,9 @@ const Chat = () => {
 
   const persistPreferences = useCallback(
     async (changes = {}) => {
+      if (stealthMode) {
+        return { success: false, error: 'Режим наблюдателя не позволяет менять настройки чата' };
+      }
       if (!chatId) return null;
       const payload = {
         customTitle:
@@ -189,18 +202,20 @@ const Chat = () => {
         return { success: false, error: err.message };
       }
     },
-    [chatId, preferences.customTitle, preferences.notificationsEnabled]
+    [chatId, preferences.customTitle, preferences.notificationsEnabled, stealthMode]
   );
 
   const handleRenameChat = useCallback(
     async (title) => {
+      if (stealthMode) return;
       await persistPreferences({ customTitle: title });
     },
-    [persistPreferences]
+    [persistPreferences, stealthMode]
   );
 
   const handleNotificationsChange = useCallback(
     async (enabled) => {
+      if (stealthMode) return;
       let nextValue = enabled;
       if (nextValue && notificationPermission !== 'granted') {
         const result = await requestNotificationPermission();
@@ -211,10 +226,11 @@ const Chat = () => {
       }
       await persistPreferences({ notificationsEnabled: nextValue });
     },
-    [notificationPermission, persistPreferences, requestNotificationPermission]
+    [notificationPermission, persistPreferences, requestNotificationPermission, stealthMode]
   );
 
   const handleGenerateInvite = useCallback(async () => {
+    if (stealthMode) return;
     if (!chatId) return;
     setGeneratingInvite(true);
     setInviteInfo((prev) => (prev ? { ...prev, error: null } : null));
@@ -235,7 +251,7 @@ const Chat = () => {
     } finally {
       setGeneratingInvite(false);
     }
-  }, [chatId]);
+  }, [chatId, stealthMode]);
 
   useEffect(() => {
     let active = true;
@@ -305,6 +321,12 @@ const Chat = () => {
     if (!chatId || loadingChat || chatInfoError) {
       return;
     }
+    if (stealthMode) {
+      setPreferences({ customTitle: null, notificationsEnabled: false });
+      setPreferencesLoading(false);
+      setPreferencesError(null);
+      return;
+    }
     let active = true;
     setPreferencesLoading(true);
     setPreferencesError(null);
@@ -329,7 +351,7 @@ const Chat = () => {
     return () => {
       active = false;
     };
-  }, [chatId, loadingChat, chatInfoError]);
+  }, [chatId, loadingChat, chatInfoError, stealthMode]);
 
   const cleanupConnections = useCallback(() => {
     peersRef.current.forEach((pc) => {
@@ -378,20 +400,23 @@ const Chat = () => {
         const stream = event.streams?.[0] || new MediaStream([event.track]);
         if (stream) {
           const existing = remoteStreamsRef.current.get(peerId);
+          const participant = participantsRef.current.find((item) => item.id === peerId);
+          const hidden = Boolean(participant?.hidden);
           if (existing && existing.stream) {
             if (!existing.stream.getTracks().some((track) => track.id === event.track.id)) {
               existing.stream.addTrack(event.track);
             }
-            remoteStreamsRef.current.set(peerId, { ...existing });
+            remoteStreamsRef.current.set(peerId, { ...existing, hidden });
           } else {
             remoteStreamsRef.current.set(peerId, {
               id: peerId,
               stream,
-              label:
-                participantsRef.current.find((participant) => participant.id === peerId)?.displayName || 'Участник',
+              label: participant?.displayName || 'Участник',
+              hidden,
             });
           }
-          setRemoteStreams(Array.from(remoteStreamsRef.current.values()));
+          const visibleStreams = Array.from(remoteStreamsRef.current.values()).filter((item) => !item.hidden);
+          setRemoteStreams(visibleStreams);
         }
       };
 
@@ -479,9 +504,13 @@ const Chat = () => {
       const participant = participants.find((item) => item.id === peerId);
       if (participant) {
         streamInfo.label = participant.displayName;
+        streamInfo.hidden = Boolean(participant.hidden);
+      } else {
+        streamInfo.hidden = false;
       }
     });
-    setRemoteStreams(Array.from(remoteStreamsRef.current.values()));
+    const visibleStreams = Array.from(remoteStreamsRef.current.values()).filter((item) => !item.hidden);
+    setRemoteStreams(visibleStreams);
   }, [participants]);
 
   useEffect(() => {
@@ -497,7 +526,7 @@ const Chat = () => {
     socket.on('connect', () => {
       selfIdRef.current = socket.id;
       setSocketReady(true);
-      socket.emit('joinChat', { chatId, displayName: user?.username });
+      socket.emit('joinChat', { chatId, displayName: user?.username, stealth: stealthMode });
     });
 
     socket.on('connect_error', (err) => {
@@ -602,6 +631,7 @@ const Chat = () => {
     updateBoardObjects,
     maybeNotify,
     user?.username,
+    stealthMode,
   ]);
 
   useEffect(() => {
@@ -640,21 +670,25 @@ const Chat = () => {
   }, [socketReady, boardOpen, callActive, chatId]);
 
   const handleSendMessage = (message) => {
+    if (stealthMode) return;
     if (!socketRef.current) return;
     socketRef.current.emit('chatMessage', { chatId, message });
   };
 
   const handleSendAudioMessage = ({ dataUrl, duration }) => {
+    if (stealthMode) return;
     if (!socketRef.current || !dataUrl) return;
     socketRef.current.emit('voiceMessage', { chatId, audioData: dataUrl, duration });
   };
 
   const handleSendFile = (file) => {
+    if (stealthMode) return;
     if (!socketRef.current) return;
     socketRef.current.emit('fileShare', { chatId, ...file });
   };
 
   const handleStartCall = async () => {
+    if (stealthMode) return;
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
       localStreamRef.current = stream;
@@ -677,6 +711,16 @@ const Chat = () => {
   };
 
   const handleEndCall = () => {
+    if (stealthMode) {
+      stopLocalMedia();
+      cleanupConnections();
+      setCallActive(false);
+      setBoardOpen(false);
+      updateBoardObjects(() => []);
+      setMicMuted(false);
+      setCameraOff(false);
+      return;
+    }
     socketRef.current?.emit('endCall', { chatId });
     stopLocalMedia();
     cleanupConnections();
@@ -688,14 +732,17 @@ const Chat = () => {
   };
 
   const handleRequestBoard = () => {
+    if (stealthMode) return;
     socketRef.current?.emit('requestBoard', { chatId });
   };
 
   const handleCloseBoard = () => {
+    if (stealthMode) return;
     socketRef.current?.emit('closeBoard', { chatId });
   };
 
   const handleAddBoardObject = (object) => {
+    if (stealthMode) return;
     if (!object || !object.id) return;
     const payload = JSON.parse(JSON.stringify(object));
     updateBoardObjects((prev) => {
@@ -709,6 +756,7 @@ const Chat = () => {
   };
 
   const handleUpdateBoardObject = (objectId, updates) => {
+    if (stealthMode) return;
     if (!objectId || !updates) return;
     const sanitized = JSON.parse(JSON.stringify(updates));
     updateBoardObjects((prev) =>
@@ -718,22 +766,25 @@ const Chat = () => {
   };
 
   const handleRemoveBoardObject = (objectId) => {
+    if (stealthMode) return;
     if (!objectId) return;
     updateBoardObjects((prev) => prev.filter((item) => item.id !== objectId));
     socketRef.current?.emit('boardRemoveObject', { chatId, objectId });
   };
 
   const handleClearBoard = () => {
+    if (stealthMode) return;
     updateBoardObjects(() => []);
     socketRef.current?.emit('boardClear', { chatId });
   };
 
   const handleLeave = () => {
     handleEndCall();
-    navigate('/dashboard');
+    navigate(exitRoute);
   };
 
   const handleToggleMic = () => {
+    if (stealthMode) return;
     if (!localStreamRef.current) {
       setMicMuted((prev) => !prev);
       return;
@@ -748,6 +799,7 @@ const Chat = () => {
   };
 
   const handleToggleCamera = () => {
+    if (stealthMode) return;
     if (!localStreamRef.current) {
       setCameraOff((prev) => !prev);
       return;
@@ -803,6 +855,11 @@ const Chat = () => {
             {preferencesError && (
               <p className="text-sm text-amber-300 mt-2">{preferencesError}</p>
             )}
+            {stealthMode && (
+              <p className="text-xs text-indigo-200 mt-2">
+                Вы скрытно наблюдаете за разговором. Сообщения и звонок доступны только для чтения.
+              </p>
+            )}
           </div>
           <button
             onClick={handleLeave}
@@ -824,6 +881,7 @@ const Chat = () => {
           micMuted={micMuted}
           cameraOff={cameraOff}
           disabled={!socketReady}
+          stealthMode={stealthMode}
         />
 
         <div className="grid xl:grid-cols-[minmax(320px,380px),1fr] gap-6">
@@ -845,12 +903,12 @@ const Chat = () => {
                   messages={messages}
                   onSendMessage={handleSendMessage}
                   onSendAudioMessage={handleSendAudioMessage}
-                  disabled={!socketReady}
+                  disabled={!socketReady || stealthMode}
                 />
               )}
             </div>
             <div className="rounded-3xl border border-white/10 bg-white/5 backdrop-blur-xl p-5">
-              <FileSharing files={files} onSendFile={handleSendFile} disabled={!socketReady} />
+              <FileSharing files={files} onSendFile={handleSendFile} disabled={!socketReady || stealthMode} />
             </div>
           </section>
 
@@ -870,25 +928,32 @@ const Chat = () => {
                 onUpdateObject={handleUpdateBoardObject}
                 onRemoveObject={handleRemoveBoardObject}
                 onClear={handleClearBoard}
-                disabled={!boardOpen || !callActive}
+                disabled={!boardOpen || !callActive || stealthMode}
               />
             </div>
-            <div className="rounded-3xl border border-white/10 bg-white/5 backdrop-blur-xl p-4">
-              <ChatSettings
-                chatId={chatId}
-                partner={chatInfo?.partner || null}
-                preferences={preferences}
-                loading={preferencesLoading}
-                onRename={handleRenameChat}
-                onToggleNotifications={handleNotificationsChange}
-                notificationsSupported={notificationsSupported}
-                notificationPermission={notificationPermission}
-                onRequestPermission={requestNotificationPermission}
-                onGenerateInvite={handleGenerateInvite}
-                generatingInvite={generatingInvite}
-                inviteInfo={inviteInfo}
-              />
-            </div>
+            {!stealthMode ? (
+              <div className="rounded-3xl border border-white/10 bg-white/5 backdrop-blur-xl p-4">
+                <ChatSettings
+                  chatId={chatId}
+                  partner={chatInfo?.partner || null}
+                  preferences={preferences}
+                  loading={preferencesLoading}
+                  onRename={handleRenameChat}
+                  onToggleNotifications={handleNotificationsChange}
+                  notificationsSupported={notificationsSupported}
+                  notificationPermission={notificationPermission}
+                  onRequestPermission={requestNotificationPermission}
+                  onGenerateInvite={handleGenerateInvite}
+                  generatingInvite={generatingInvite}
+                  inviteInfo={inviteInfo}
+                />
+              </div>
+            ) : (
+              <div className="rounded-3xl border border-white/10 bg-white/5 backdrop-blur-xl p-4 text-sm text-slate-300">
+                Настройки чата недоступны в режиме наблюдателя. Вы можете просматривать историю и файлы, но управление
+                отключено.
+              </div>
+            )}
             <div className="rounded-3xl border border-white/10 bg-white/5 backdrop-blur-xl p-4">
               <ParticipantsList participants={participants} selfId={selfIdRef.current} />
             </div>

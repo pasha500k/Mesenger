@@ -1,7 +1,7 @@
 {
-  "name": "novacollab-desktop",
+  "name": "lynxoria-desktop",
   "version": "0.1.0",
-  "description": "Electron оболочка для настольной версии NovaCollab",
+  "description": "Electron оболочка для настольной версии Lynxoria",
   "main": "main.js",
   "author": "",
   "license": "MIT",

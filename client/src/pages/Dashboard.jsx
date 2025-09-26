@@ -101,12 +101,22 @@ const Dashboard = () => {
               Ваши чаты синхронизируются и сохраняют историю сообщений. При необходимости начните звонок прямо из диалога.
             </p>
           </div>
-          <button
-            onClick={logout}
-            className="self-start md:self-auto px-5 py-2.5 rounded-full border border-white/20 hover:border-white/60 transition"
-          >
-            Выйти
-          </button>
+          <div className="flex flex-wrap gap-3">
+            {user?.username === 'admin' && (
+              <button
+                onClick={() => navigate('/admin')}
+                className="self-start md:self-auto px-5 py-2.5 rounded-full bg-indigo-500/80 hover:bg-indigo-400 transition"
+              >
+                Открыть админ-панель
+              </button>
+            )}
+            <button
+              onClick={logout}
+              className="self-start md:self-auto px-5 py-2.5 rounded-full border border-white/20 hover:border-white/60 transition"
+            >
+              Выйти
+            </button>
+          </div>
         </header>
 
         <div className="grid lg:grid-cols-3 gap-8">

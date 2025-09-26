@@ -11,7 +11,7 @@ const createWindow = () => {
     height: 800,
     minWidth: 960,
     minHeight: 640,
-    title: 'NovaCollab',
+    title: 'Lynxoria',
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,

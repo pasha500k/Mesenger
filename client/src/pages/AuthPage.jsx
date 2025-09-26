@@ -40,9 +40,11 @@ const AuthPage = () => {
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-950 via-slate-900 to-indigo-950 flex items-center justify-center px-4">
       <div className="w-full max-w-md backdrop-blur-xl bg-white/10 border border-white/10 rounded-3xl shadow-2xl p-8">
-        <h1 className="text-2xl font-semibold text-white text-center mb-2">NovaCollab</h1>
+        <h1 className="text-2xl font-semibold text-white text-center mb-2">Lynxoria</h1>
         <p className="text-center text-slate-300 mb-6">
-          {mode === 'login' ? 'Войдите в аккаунт, чтобы продолжить' : 'Создайте учетную запись за несколько секунд'}
+          {mode === 'login'
+            ? 'Войдите, чтобы продолжить общение и звонки'
+            : 'Создайте аккаунт Lynxoria за пару секунд'}
         </p>
         <div className="flex mb-6 rounded-full bg-white/10 p-1">
           <button

@@ -1,6 +1,6 @@
 {
-  "appId": "com.novacollab.desktop",
-  "productName": "NovaCollab",
+  "appId": "com.lynxoria.desktop",
+  "productName": "Lynxoria",
   "directories": {
     "output": "release",
     "buildResources": "resources"
